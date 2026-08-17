@@ -1,0 +1,74 @@
+:root {
+  --gov-blue: #1f3b73;
+  --gov-blue-light: #2f5aa8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  background: #f0f2f5;
+  color: #303133;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.page-container {
+  padding: 16px;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--gov-blue);
+  margin: 0 0 4px;
+}
+
+.page-sub {
+  color: #909399;
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+
+.card-gap {
+  margin-bottom: 16px;
+}
+
+/* 顶部主色横幅 */
+.gov-header-banner {
+  background: linear-gradient(135deg, #1f3b73 0%, #2f5aa8 100%);
+  color: #fff;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+/* 聊天流式光标 */
+.stream-cursor::after {
+  content: '▍';
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}

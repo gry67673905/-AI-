@@ -1,0 +1,18 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.local
+
+# Java 编译产物
+bin/
+target/
+*.class
+
+# Claude Code 本地数据
+.claude/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
