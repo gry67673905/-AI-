@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+android
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+**/build
+volumes
+artifacts
+

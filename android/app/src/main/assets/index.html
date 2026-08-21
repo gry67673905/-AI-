@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>智慧政务助手</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+    <header>
+        <h1>智慧政务助手</h1>
+        <p id="native-status">正在连接 Android 服务…</p>
+    </header>
+
+    <form id="chat-form">
+        <label for="message">请输入要咨询的政务事项</label>
+        <textarea id="message" maxlength="1000" required
+                  placeholder="例如：补办身份证需要准备哪些材料？"></textarea>
+        <div class="actions">
+            <button id="submit" type="submit">发送问题</button>
+            <button id="map" type="button" class="secondary">打开 HMS 地图</button>
+        </div>
+    </form>
+
+    <section aria-live="polite" aria-atomic="true">
+        <h2>答复</h2>
+        <p id="answer">响应会显示在这里。</p>
+        <pre id="metadata" hidden></pre>
+    </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

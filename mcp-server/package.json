@@ -1,0 +1,20 @@
+{
+  "name": "smart-gov-mcp-http-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/app.js && node --check src/auth.js && node --check src/gov-api-client.js && node --check src/server.js && node --check src/tools.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "5.1.0",
+    "smart-gov-mcp-server": "file:vendor/smart-gov-mcp-server-1.0.1.tgz",
+    "zod": "3.25.76"
+  }
+}

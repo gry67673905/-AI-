@@ -1,0 +1,81 @@
+:root {
+    color-scheme: light;
+    font-family: system-ui, sans-serif;
+    color: #10223c;
+    background: #f4f7fc;
+}
+
+body {
+    margin: 0;
+}
+
+main {
+    box-sizing: border-box;
+    width: min(100%, 760px);
+    margin: 0 auto;
+    padding: 24px 18px 36px;
+}
+
+h1 {
+    margin-bottom: 4px;
+}
+
+#native-status {
+    margin-top: 0;
+    color: #60708a;
+}
+
+form,
+section {
+    margin-top: 22px;
+    padding: 18px;
+    border-radius: 12px;
+    background: #fff;
+}
+
+label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 120px;
+    padding: 12px;
+    resize: vertical;
+}
+
+.actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+button {
+    min-height: 44px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 8px;
+    color: #fff;
+    background: #1769e8;
+}
+
+button.secondary {
+    background: #60708a;
+}
+
+button:disabled {
+    opacity: .55;
+}
+
+#answer {
+    white-space: pre-wrap;
+}
+
+pre {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    color: #3c4a60;
+}

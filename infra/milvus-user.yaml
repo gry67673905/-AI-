@@ -1,0 +1,4 @@
+# Milvus can log its object-storage configuration at INFO during compaction.
+# Keep local runtime logs useful while preventing credentials from reaching stdout.
+log:
+  level: warn

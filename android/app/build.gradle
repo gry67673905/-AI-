@@ -1,0 +1,101 @@
+import groovy.json.JsonSlurper
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.huawei.agconnect)
+}
+
+def agcConfigFile = file("agconnect-services.json")
+def hmsMapApiKey = ""
+if (agcConfigFile.exists()) {
+    def agcConfig = new JsonSlurper().parse(agcConfigFile)
+    hmsMapApiKey = (agcConfig.client.api_key ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+}
+
+def sharedDebugKeystore = file("D:/AndroidDev/keystores/ai-companion-debug.keystore")
+def govApiBaseOverride = providers.gradleProperty("govApiBase").orNull
+def debugGovApiBase = (govApiBaseOverride ?: "http://10.0.2.2:8000").replaceAll('/+$', '')
+def releaseGovApiBase = (govApiBaseOverride ?: "https://api.invalid").replaceAll('/+$', '')
+def escapedDebugGovApiBase = debugGovApiBase
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+def escapedReleaseGovApiBase = releaseGovApiBase
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
+android {
+    namespace "com.example.aicompanion"
+    compileSdk 35
+
+    signingConfigs {
+        if (sharedDebugKeystore.exists()) {
+            sharedDebug {
+                storeFile sharedDebugKeystore
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.example.aicompanion"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+
+        buildConfigField "String", "HMS_MAP_API_KEY", "\"${hmsMapApiKey}\""
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField "String", "GOV_API_BASE", "\"${escapedDebugGovApiBase}\""
+            if (sharedDebugKeystore.exists()) {
+                signingConfig signingConfigs.sharedDebug
+            }
+        }
+        release {
+            buildConfigField "String", "GOV_API_BASE", "\"${escapedReleaseGovApiBase}\""
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+        viewBinding false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+configurations.configureEach {
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
+}
+
+dependencies {
+    implementation libs.androidx.core
+    implementation libs.androidx.appcompat
+    implementation libs.androidx.lifecycle.viewmodel
+    implementation libs.androidx.webkit
+    implementation libs.gson
+    implementation libs.okhttp
+    implementation libs.huawei.agconnect.core
+    implementation libs.huawei.hms.maps
+    implementation libs.huawei.hms.maps.basic
+    implementation libs.huawei.hms.location
+
+    testImplementation libs.junit
+    testImplementation libs.okhttp.mockwebserver
+}
+
+tasks.withType(Test).configureEach {
+    useJUnit()
+    systemProperty "liveBackendTest", System.getProperty("liveBackendTest", "false")
+    systemProperty "liveBackendUrl", System.getProperty("liveBackendUrl", "http://127.0.0.1:8000")
+}

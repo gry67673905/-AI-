@@ -1,0 +1,13 @@
+alembic==1.19.1
+asyncpg==0.31.0
+fastapi==0.141.1
+httpx==0.28.1
+langchain-core==1.6.0
+langchain-deepseek==1.1.0
+mcp==1.29.0
+pydantic==2.13.4
+pydantic-settings==2.15.0
+pymilvus==2.6.17
+redis==7.2.2
+SQLAlchemy==2.0.52
+uvicorn[standard]==0.52.4

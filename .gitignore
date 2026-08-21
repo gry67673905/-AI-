@@ -1,0 +1,38 @@
+# Local secrets
+.env
+*.local
+key-list.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+htmlcov/
+.coverage
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Android / Gradle
+.gradle/
+local.properties
+**/build/
+*.apk
+*.aab
+android/app/agconnect-services.json
+
+# Runtime data
+volumes/
+artifacts/
+logs/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
