@@ -9,6 +9,24 @@ $workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $backendRoot = Join-Path $workspaceRoot "backend"
 $backendPython = Join-Path $backendRoot ".venv\Scripts\python.exe"
 
+$syntaxErrors = @()
+foreach ($scriptFile in Get-ChildItem -LiteralPath (Join-Path $workspaceRoot "scripts") -Filter "*.ps1" -File) {
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile(
+        $scriptFile.FullName,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    foreach ($parseError in @($errors)) {
+        $syntaxErrors += "$($scriptFile.Name):$($parseError.Extent.StartLineNumber): $($parseError.Message)"
+    }
+}
+if ($syntaxErrors.Count -gt 0) {
+    throw "PowerShell syntax validation failed:`n$($syntaxErrors -join "`n")"
+}
+Write-Host "PowerShell scripts passed AST syntax validation."
+
 if (-not (Test-Path -LiteralPath $backendPython)) {
     if (-not $InstallDependencies) {
         throw "Backend virtual environment is missing. Re-run with -InstallDependencies."
@@ -56,12 +74,11 @@ if (-not $SkipAndroid) {
     }
     Push-Location (Join-Path $workspaceRoot "android")
     try {
-        & $gradle :app:testDebugUnitTest :app:assembleDebug
-        if ($LASTEXITCODE -ne 0) { throw "Android tests or build failed." }
+        & $gradle :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
+        if ($LASTEXITCODE -ne 0) { throw "Android lint, tests, or build failed." }
     } finally {
         Pop-Location
     }
 }
 
 Write-Host "All requested source-level checks passed."
-

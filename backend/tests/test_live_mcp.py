@@ -27,8 +27,16 @@ async def test_python_client_calls_real_node_mcp_server() -> None:
         "search_services",
         "get_service_details",
         "get_material_checklist",
+        "get_process_navigation",
+        "get_window_info",
     ]
     assert all(call.success for call in calls)
-    assert len(sources) == 3
+    assert len(sources) == 5
     assert all(source.kind == "mcp" for source in sources)
-
+    assert {source.reference for source in sources} == {
+        "mcp:search_services",
+        "mcp:get_service_details",
+        "mcp:get_material_checklist",
+        "mcp:get_process_navigation",
+        "mcp:get_window_info",
+    }

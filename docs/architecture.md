@@ -1,50 +1,164 @@
-# 智慧政务助手架构
+# 智慧政务“一网通办”架构
 
-## 本地拓扑
+## 目标与边界
+
+系统在本地 Compose 中跑通 Android → FastAPI → PostgreSQL/Redis/Milvus/MinIO/MCP → 模拟政务 API 与 DeepSeek。FastAPI 是模块化单体和业务写入入口；MCP 是独立 Node Streamable HTTP 服务，只提供公开目录只读工具。PostgreSQL 是内部事项、账号、办件和审计的权威源。
+
+当前数据和 Provider 全是本地演示：不连接真实政务、身份、人脸、支付、银行、短信或邮寄平台。模型输出只能解释和建议，任何状态变更都必须经过显式业务 API、鉴权、规则校验、幂等和审计。
+
+## 本地部署拓扑
 
 ```mermaid
 flowchart LR
-    Android[Android WebView\nViewModel / Repository\nHMS Core]
-    API[Uvicorn + FastAPI\nLangChain 编排]
-    PG[(PostgreSQL)]
-    Redis[(Redis)]
-    Milvus[(Milvus)]
-    MCP[Node MCP Server\nStreamable HTTP]
-    GovAPI[模拟政务 REST API]
-    LLM[DeepSeek API]
+    subgraph Android[Android com.example.aicompanion]
+        SPA[本地资产 SPA]
+        JSB[窄 JS Boundary]
+        VM[PortalCoordinatorViewModel]
+        Native[原生网关/材料/语音/TTS/HMS]
+        SPA --> JSB --> VM --> Native
+    end
 
-    Android -->|HTTP /api/v1/chat| API
-    API --> PG
-    API --> Redis
-    API --> Milvus
-    API -->|MCP /mcp| MCP
-    MCP -->|Bearer + HTTP| GovAPI
-    API -->|LangChain| LLM
+    subgraph API[Python 3.13 API 容器]
+        UV[Uvicorn]
+        FastAPI[FastAPI 边界]
+        Coord[用例协调者]
+        Domain[领域实体与业务策略]
+        Adapters[基础设施适配器]
+        UV --> FastAPI --> Coord --> Domain
+        Coord --> Adapters
+    end
+
+    PG[(PostgreSQL 16)]
+    Redis[(Redis 7\n公开检索缓存 v2)]
+    Milvus[(Milvus 2.6\n知识向量 v2)]
+    MinIO[(MinIO\n私有材料/知识文件)]
+    MCP[Node MCP Server\n/mcp + /health]
+    Mock[模拟政务 REST API\n六个公开事项]
+    LLM[DeepSeek deepseek-chat]
+    etcd[(etcd)]
+
+    Native -->|HTTP / SSE| UV
+    Adapters --> PG
+    Adapters --> Redis
+    Adapters --> Milvus
+    Adapters --> MinIO
+    Adapters -->|内部 Bearer| MCP
+    MCP -->|独立 Bearer| Mock
+    Adapters -->|LangChain ChatDeepSeek| LLM
+    Milvus --> etcd
+    Milvus --> MinIO
 ```
 
-Uvicorn 是 FastAPI 的 ASGI 运行器，不作为独立业务服务。MCP 使用独立容器和 Streamable HTTP，避免把 Node 子进程绑定到某个 Uvicorn worker。
+Uvicorn 仅运行 ASGI 应用，不承担 MCP 或额外业务角色。除 API `127.0.0.1:8000` 和 PostgreSQL 调试端口 `127.0.0.1:15432` 外，其余服务默认只在 Compose 网络中开放。
 
-## 一次问答的数据流
+## 模块化单体与依赖方向
 
-1. WebView 只把问题交给原生 JS Bridge；`AssistantViewModel` 调用 `GovAssistantRepository`。
-2. FastAPI 校验匿名 `session_id` 和问题，在 PostgreSQL 中保存用户消息。
-3. 后端先检查 Redis 中的检索上下文缓存；未命中时并发查询 Milvus 和 MCP。
-4. MCP 工具调用模拟政务 API；Milvus 返回演示知识片段。
-5. LangChain 将两类上下文交给 DeepSeek，回答始终带“演示数据”边界。
-6. 后端保存助手消息和工具审计，返回来源、工具调用、缓存状态与降级警告。
+后端依赖方向固定为：
 
-## 故障边界
+```mermaid
+flowchart LR
+    Boundary[边界类\nHTTP/鉴权/协议转换] --> Coordinator[协调者类\n用例/事务/审计/端口编排]
+    Coordinator --> Domain[业务逻辑与实体\n纯 Python]
+    Coordinator --> Ports[应用端口]
+    Adapter[基础设施适配器\nSQLAlchemy/MinIO/MCP/RAG/LLM] -.实现.-> Ports
+    Adapter --> External[(数据库与外部服务)]
+```
 
-- PostgreSQL 不可用：请求返回 `503`，不生成无法持久化的会话。
-- DeepSeek 不可用：请求返回 `502`，不以模板文本冒充模型回答。
-- Redis 不可用：绕过缓存，继续检索。
-- MCP 或 Milvus 单项不可用：使用剩余上下文继续回答，并在 `warnings` 中标记降级。
-- `/health/ready` 只有在 PostgreSQL、Redis、Milvus、MCP 和模拟 API 全部正常时才返回就绪。
+- `app/domain` 不依赖 FastAPI、SQLAlchemy、Redis、Milvus、MCP 或 Android。
+- 领域实体使用普通 `dataclass`/枚举；数据库映射位于 `infrastructure/records.py`，统一以 `*Record` 命名。
+- Boundary 只校验输入、鉴权和转换协议，不决定业务状态。
+- Coordinator 编排一次用例并调用 Repository/Provider；Policy 独立判断资格、材料、状态、分派、权限和溯源。
+- `ConsultationCoordinator` 是聊天的 BCE 用例协调者；`app/chat.py` 仅保留向后兼容的强类型 facade，Boundary 通过 DTO/Port 调用协调者，不直接访问缓存、MCP、Milvus 或模型。
+- `infrastructure/runtime.py` 是组合根，只负责把 Repository、安全、对象存储和各外部适配器注入协调者，不承载业务决策。
+- PostgreSQL 事务同时写办件事件和业务审计，已提交办件不物理删除。
 
-## 云端迁移边界
+具体类和状态见 [业务与领域设计](business-design.md)。
 
-- 保持 API、MCP 与模拟/真实政务 API 的容器边界不变，替换环境变量中的服务地址。
-- PostgreSQL、Redis、Milvus 可替换为托管服务；不需要修改 Android 契约。
-- 在公网入口前增加 HTTPS 反向代理，并把 `.env` 替换为云端 Secret Manager。
-- 接入真实政务 API 后删除模拟服务，并在 MCP Provider 中完成鉴权、授权、审计与字段脱敏。
+## 关键数据流
 
+### 公开咨询
+
+1. WebView 将枚举化命令交给 `PortalJsBoundary`，原生 `StreamingGateway` 或普通网关请求 FastAPI。
+2. `ConsultationCoordinator` 从 PostgreSQL 的已发布目录建立执行上下文；歧义（例如“社保”）直接返回多个候选，不调用检索或模型。
+3. 对已选择事项，协调者用事项 UUID、编码、标题和简介等白名单公开字段生成 `local_catalog` 来源；字段经过公开文本脱敏，不从模型或 Mock API 反推。
+4. Redis 只缓存“规范化公开问题 + 外部事项映射 ID”对应的 MCP/RAG 检索上下文。`local_catalog` 每次从 PostgreSQL 当前版本重建，因此不会被旧缓存覆盖。
+5. 缓存未命中时，MCP 与 Milvus 并行检索：MCP 通过五个只读工具访问 Mock API，Milvus 只返回 ACTIVE 知识片段。
+6. 有至少一个有效可核验来源时，LangChain 才把公开问题与来源交给 DeepSeek；`local_catalog`、`mcp`、`rag` 三类来源保持独立标识，回答和工具审计持久化到 PostgreSQL。
+7. `/chat/stream` 固定输出 `meta`、`delta`、`done` 或 `error` SSE 事件；Android 最终使用 `TextToSpeech` 播报，原始音频不上传。
+
+若问题绑定 `application_id`，必须登录并经过授权查询；后端直接返回受控的办件状态描述，不将私人办件上下文发送给 Redis、MCP、Milvus 或 LLM。
+
+### 办件与审核
+
+```mermaid
+sequenceDiagram
+    participant C as 群众原生网关
+    participant B as CitizenPortalBoundary
+    participant A as ApplicationCoordinator
+    participant DB as PostgreSQL
+    participant O as MinIO
+    participant S as StaffWorkbenchBoundary
+
+    C->>B: 创建草稿（JWT + Idempotency-Key）
+    B->>A: service_id + 合成表单
+    A->>DB: 校验申请人类型/已发布版本并建草稿
+    C->>B: 上传 PDF/JPEG/PNG
+    B->>A: 文件 + requirement_code
+    A->>O: 写入私有对象
+    A->>DB: 保存哈希/类型/大小/NOT_SCANNED_DEMO
+    C->>B: 提交（version + Idempotency-Key）
+    A->>DB: 表单/资格/材料/预约/核验校验，建审核任务
+    S->>DB: 部门内认领，乐观锁推进状态
+    S->>DB: 补正/驳回/批准/办结 + 不可变事件/审计
+```
+
+每次材料上传和状态变更都会推进 `version`。客户端必须使用最新版本；并发冲突返回 409。副作用接口使用 `(actor, scope, Idempotency-Key, payload hash)` 去重，相同键不同载荷拒绝执行。
+
+### 事项与知识发布
+
+管理员创建事项时生成版本 1；后续修改创建新 `ServiceVersion`。已发布版本不可原地改写，生命周期策略控制发布、暂停、恢复和终止。管理员上传 PDF/DOCX/TXT/Markdown 后，文件进入知识 bucket，文本切分为 `KnowledgeChunk`，索引任务以 `INDEXING` 分阶段写入 `gov_knowledge_v2`，全部向量成功发布后才进入 `ACTIVE`。
+
+索引/发布失败会持久化 `INDEX_FAILED`；首次失败的结构化 409 在 `detail.job_id` 返回任务标识，管理员用该 ID 和幂等键重试。进程启动会把遗留的 `INDEXING` 任务恢复成可重试的 `INDEX_FAILED`，并以 PostgreSQL 的 ACTIVE 知识块重新激活 Milvus，保证持久卷升级后仍可检索。管理员可归档 `ACTIVE/SUPERSEDED` 任务：元数据和审计保留，若无同文档的其他 ACTIVE 任务，则知识块转为 `ARCHIVED` 并从向量检索移除。重试/归档成功会使公开 Redis 缓存失效。当前没有独立知识任务列表 API，调用方需保存上传响应或失败详情中的 `job_id`。
+
+## Android 架构与原生边界
+
+Android 使用单 Activity 安全 WebView 宿主：
+
+- 边界：`PortalJsBoundary`、`DocumentPickerBoundary`、`VoiceCaptureBoundary`、`TextToSpeechBoundary`、`WindowMapBoundary`；
+- 协调者：`PortalCoordinatorViewModel`、`AuthCoordinator`、`CitizenCoordinator`、`StaffTaskCoordinator`、`AdminCoordinator`、`VoiceConsultationCoordinator`；
+- 业务策略：`PortalCommandPolicy`、`DynamicFormValidator`、`MaterialCompletionPolicy`、`RoleNavigationPolicy`、`SensitiveDisplayPolicy`；
+- 网关：Auth/Catalog/Application/Staff/Admin/Streaming 的 OkHttp 实现及 `AndroidKeystoreSessionStore`。
+
+JS 不能指定任意 URL、HTTP 方法、原生类名、坐标或外部链接；角色与命令需通过 `PortalCommandPolicy`。WebView 不接触 access/refresh token，结果由可观察 ViewModel 状态回传，避免 Activity 重建时回调持有旧实例。
+
+## 数据隔离与安全
+
+| 数据 | 存储/处理 | 禁止事项 |
+| --- | --- | --- |
+| 公开事项/知识 | PostgreSQL、Milvus、Redis v2、MCP/Mock | 不宣称真实政策 |
+| 账号/JWT refresh hash | PostgreSQL；Android Token 在 Keystore 加密存储 | 不进入 WebView/日志/明文偏好 |
+| 私人表单/办件 | PostgreSQL 授权查询 | 不进入公共缓存或 LLM 上下文 |
+| 材料 | MinIO 私有 bucket + PostgreSQL 哈希元数据 | 不生成公共直链、不在 WebView 直接打开 |
+| 生物/支付/邮寄 | 仅状态与模拟引用 | 不采集生物数据、不发生真实资金/快递 |
+| 凭据 | 被忽略的 `.env`/容器环境 | 不进入 APK、API 响应或提交历史 |
+
+JWT access token 默认 15 分钟，refresh token 默认 7 天且只保存哈希。冻结账号会递增 `token_version` 并撤销 refresh token，使已有令牌失效。工作人员只处理所属部门/窗口任务；管理员管理目录和人员，但不能代替工作人员审批。
+
+## 故障和降级边界
+
+- PostgreSQL 不可用：核心请求返回结构化 503，不创建无法持久化的结果。
+- DeepSeek 不可用：返回结构化 502，不用模板冒充模型答案。
+- Redis 不可用：公开咨询绕过缓存；私人数据本来就不使用公共缓存。
+- MCP 或 Milvus 单项不可用：使用剩余公开来源回答，并在 `warnings` 明示降级。
+- MinIO 不可用：材料/知识文件操作失败；API 就绪检查必须反映全栈依赖状态。
+- `/health/live` 只检查 API 进程；`/health/ready` 聚合 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项，任一失败返回 503。
+
+## 数据迁移与回退边界
+
+迁移链为 `0001_initial → 0002_identity_catalog → 0003_applications_operations → 0004_knowledge_audit`。旧匿名聊天保留，新 `owner_account_id` 可为空且不会自动归属后来注册的用户。Milvus 使用新集合 `gov_knowledge_v2`，Redis 使用 `smart-gov:retrieval:v2:*`；旧数据不由迁移脚本删除。
+
+`scripts/migrate.ps1` 仅执行 `upgrade head` 和状态检查；普通 `dev-down.ps1` 保留命名卷。需要回退应用时应先做数据库/对象存储备份并制定兼容策略，不能用自动 downgrade 代替数据恢复。
+
+## 云端迁移
+
+保持 Android API 契约、FastAPI/MCP 边界和 Provider 端口不变，可将 PostgreSQL、Redis、Milvus 与对象存储替换为托管服务。公网入口前必须增加 HTTPS/WAF，将 `.env` 替换为 Secret Manager，并替换本地 JWT、Mock API 与所有 Demo Provider。接入真实政务平台前还需完成正式身份、租户隔离、数据分级、病毒扫描、授权审计、隐私与合规评估。

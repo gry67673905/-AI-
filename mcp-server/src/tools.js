@@ -33,12 +33,33 @@ export function createSmartGovMcpServer(govApiClient) {
       },
       {
         name: 'get_material_checklist',
-        description: '获取指定演示政务事项的材料清单，并区分必需和可选材料。',
+        description: '获取指定演示政务事项的材料清单，并区分必需、条件必需和可选材料。',
         inputSchema: {
           itemId: z.number().int().positive().describe('事项 ID')
         },
         async handler({ itemId }) {
           return govApiClient.getMaterialChecklist(itemId)
+        }
+      },
+      {
+        name: 'get_process_navigation',
+        description: '获取指定演示政务事项的有序办理步骤、预约要求、演示费用和结果领取方式。',
+        inputSchema: {
+          itemId: z.number().int().positive().describe('事项 ID')
+        },
+        async handler({ itemId }) {
+          return govApiClient.getProcessNavigation(itemId)
+        }
+      },
+      {
+        name: 'get_window_info',
+        description: '获取指定事项的演示服务窗口；可选窗口 ID 用于获取单个已登记窗口，禁止传入任意坐标。',
+        inputSchema: {
+          itemId: z.number().int().positive().describe('事项 ID'),
+          windowId: z.string().trim().min(1).max(64).optional().describe('可选的已登记窗口 ID')
+        },
+        async handler({ itemId, windowId = '' }) {
+          return govApiClient.getWindowInfo(itemId, windowId)
         }
       }
     ]

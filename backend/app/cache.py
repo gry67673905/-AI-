@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict
 
 from redis.asyncio import Redis
 
 from app.knowledge import normalize_text
-from app.schemas import Source, ToolCall
+from app.application.dtos import SourceData, ToolCallData
+from app.security import redact_pii_text, redact_sensitive
 
 
 class RetrievalCache:
@@ -20,34 +22,70 @@ class RetrievalCache:
         self.ttl_seconds = ttl_seconds
 
     @staticmethod
-    def key_for(message: str) -> str:
-        digest = hashlib.sha256(normalize_text(message).encode("utf-8")).hexdigest()
-        return f"smart-gov:retrieval:v1:{digest}"
+    def key_for(message: str, public_context_id: str | int | None = None) -> str:
+        normalized = f"{normalize_text(message)}|service:{public_context_id or 'none'}"
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return f"smart-gov:retrieval:v2:{digest}"
 
     async def ping(self) -> None:
         if not await self.client.ping():
             raise RuntimeError("Redis ping failed")
 
-    async def get(self, message: str) -> tuple[list[Source], list[ToolCall]] | None:
-        raw = await self.client.get(self.key_for(message))
+    async def get(self, message: str, public_context_id: str | int | None = None) -> tuple[list[SourceData], list[ToolCallData]] | None:
+        raw = await self.client.get(self.key_for(message, public_context_id))
         if raw is None:
             return None
         payload = json.loads(raw)
-        sources = [Source.model_validate(item) for item in payload.get("sources", [])]
-        calls = [ToolCall.model_validate({**item, "cached": True}) for item in payload.get("tool_calls", [])]
+        sources = [SourceData(**item) for item in payload.get("sources", [])]
+        calls = [
+            ToolCallData(**{**item, "cached": True})
+            for item in payload.get("tool_calls", [])
+        ]
         return sources, calls
 
-    async def set(self, message: str, sources: list[Source], tool_calls: list[ToolCall]) -> None:
+    async def set(self, message: str, sources: list[SourceData], tool_calls: list[ToolCallData], public_context_id: str | int | None = None) -> None:
         payload = {
-            "sources": [source.model_dump(mode="json") for source in sources],
-            "tool_calls": [call.model_dump(mode="json", exclude={"cached"}) for call in tool_calls],
+            "sources": [
+                {
+                    **asdict(source),
+                    "excerpt": redact_pii_text(source.excerpt),
+                }
+                for source in sources
+            ],
+            # Public retrieval cache deliberately omits invocation arguments.
+            # They are not needed to replay a display-only result and could
+            # otherwise retain user-supplied identifiers in Redis.
+            "tool_calls": [
+                {
+                    **{
+                        key: value
+                        for key, value in asdict(call).items()
+                        if key not in {"cached", "arguments"}
+                    },
+                    "arguments": {},
+                    "result": redact_sensitive(call.result),
+                }
+                for call in tool_calls
+            ],
         }
         await self.client.setex(
-            self.key_for(message),
+            self.key_for(message, public_context_id),
             self.ttl_seconds,
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"), default=str
+            ),
         )
+
+    async def invalidate_public(self) -> None:
+        """Invalidate only public retrieval context after knowledge changes."""
+        keys = [
+            key
+            async for key in self.client.scan_iter(
+                match="smart-gov:retrieval:v2:*", count=200
+            )
+        ]
+        if keys:
+            await self.client.delete(*keys)
 
     async def close(self) -> None:
         await self.client.aclose()
-

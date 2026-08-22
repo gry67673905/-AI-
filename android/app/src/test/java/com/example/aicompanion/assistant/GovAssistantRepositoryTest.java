@@ -54,10 +54,16 @@ public class GovAssistantRepositoryTest {
         assertEquals("req-1", response.getRequestId());
         assertEquals("session-1", response.getSessionId());
         assertEquals("请携带材料。", response.getAnswer());
-        assertEquals("mcp", response.getSources().get(0).getAsJsonObject().get("kind").getAsString());
-        assertEquals("search_services", response.getToolCalls().get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals("local_catalog", response.getSources().get(0).getKind());
+        assertEquals("future_catalog", response.getSources().get(1).getKind());
+        assertEquals("search_services", response.getToolCalls().get(0).getName());
+        assertTrue(response.getToolCalls().get(0).isSuccess());
+        assertEquals(18, response.getToolCalls().get(0).getDurationMs());
+        assertEquals("身份证补领", response.getToolCalls().get(0).getArguments().get("query").getAsString());
         assertTrue(response.isCacheHit());
         assertTrue(response.getWarnings().isEmpty());
+        assertTrue(response.isClarificationRequired());
+        assertEquals("QUEUED", response.getHandoffStatus());
     }
 
     @Test
@@ -89,7 +95,8 @@ public class GovAssistantRepositoryTest {
         server.enqueue(new MockResponse()
             .setResponseCode(502)
             .setHeader("Content-Type", "application/json")
-            .setBody("{\"error\":{\"code\":\"model_error\",\"message\":\"Authorization: Bearer top-secret api_key=sk-1234567890\"}}"));
+            .setBody("{\"error\":{\"code\":\"model_error\",\"message\":\"Authorization: Bearer top-secret api_key=sk-1234567890\","
+                + "\"detail\":{\"job_id\":\"job-1\",\"refresh_token\":\"must-not-leak\"}}}"));
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<ChatError> error = new AtomicReference<>();
 
@@ -98,9 +105,12 @@ public class GovAssistantRepositoryTest {
         assertTrue(latch.await(3, TimeUnit.SECONDS));
         assertNotNull(error.get());
         assertEquals(502, error.get().getStatusCode());
+        assertEquals("model_error", error.get().getCode());
         assertFalse(error.get().getMessage().contains("top-secret"));
         assertFalse(error.get().getMessage().contains("sk-1234567890"));
         assertTrue(error.get().getMessage().contains("[REDACTED]"));
+        assertEquals("job-1", error.get().getDetails().getAsJsonObject().get("job_id").getAsString());
+        assertFalse(error.get().getDetails().getAsJsonObject().has("refresh_token"));
     }
 
     private static ChatDataSource.Callback callback(
@@ -128,10 +138,14 @@ public class GovAssistantRepositoryTest {
             + "\"request_id\":\"req-1\","
             + "\"session_id\":\"session-1\","
             + "\"answer\":\"请携带材料。\","
-            + "\"sources\":[{\"kind\":\"mcp\",\"title\":\"演示政务服务\"}],"
-            + "\"tool_calls\":[{\"name\":\"search_services\",\"result\":{\"items\":[]}}],"
+            + "\"sources\":[{\"kind\":\"local_catalog\",\"title\":\"演示政务服务\",\"reference\":\"svc-1\"},{\"kind\":\"future_catalog\",\"title\":\"未来来源\"}],"
+            + "\"tool_calls\":[{\"name\":\"search_services\",\"success\":true,\"arguments\":{\"query\":\"身份证补领\"},\"result\":{\"items\":[]},\"duration_ms\":18,\"cached\":false}],"
             + "\"cache_hit\":true,"
-            + "\"warnings\":[]"
+            + "\"warnings\":[],"
+            + "\"candidate_services\":[{\"id\":\"svc-1\"}],"
+            + "\"suggested_actions\":[{\"action\":\"open_service\"}],"
+            + "\"clarification_required\":true,"
+            + "\"handoff_status\":\"QUEUED\""
             + "}";
     }
 }

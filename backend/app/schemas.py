@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, field_validator
 class ChatRequest(BaseModel):
     session_id: UUID | None = None
     message: str = Field(min_length=1, max_length=1000)
+    service_id: UUID | None = None
+    application_id: UUID | None = None
 
     @field_validator("message")
     @classmethod
@@ -20,7 +22,7 @@ class ChatRequest(BaseModel):
 
 
 class Source(BaseModel):
-    kind: Literal["mcp", "rag"]
+    kind: Literal["mcp", "rag", "local_catalog"]
     title: str
     reference: str
     excerpt: str
@@ -45,6 +47,10 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     cache_hit: bool
     warnings: list[str] = Field(default_factory=list)
+    candidate_services: list[dict[str, Any]] = Field(default_factory=list)
+    suggested_actions: list[dict[str, Any]] = Field(default_factory=list)
+    clarification_required: bool = False
+    handoff_status: str | None = None
 
 
 class HealthCheck(BaseModel):
@@ -62,8 +68,8 @@ class ErrorBody(BaseModel):
     code: str
     message: str
     request_id: UUID | None = None
+    detail: Any | None = None
 
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
-

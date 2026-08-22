@@ -24,9 +24,17 @@ export function createApp({
   govApiBaseUrl,
   govApiToken,
   fetchImpl = globalThis.fetch,
-  logger = console
+  logger = console,
+  sessionTtlMs = 15 * 60 * 1000,
+  maxSessions = 128
 } = {}) {
   if (!internalToken) throw new Error('MCP_INTERNAL_TOKEN is required')
+  if (!Number.isFinite(sessionTtlMs) || sessionTtlMs <= 0) {
+    throw new Error('sessionTtlMs must be a positive number')
+  }
+  if (!Number.isInteger(maxSessions) || maxSessions <= 0) {
+    throw new Error('maxSessions must be a positive integer')
+  }
   const govApiClient = new GovApiClient({
     baseUrl: govApiBaseUrl,
     token: govApiToken,
@@ -48,24 +56,56 @@ export function createApp({
     next()
   })
 
+  async function disposeSession(sessionId, entry) {
+    if (sessions.get(sessionId) !== entry) return
+    sessions.delete(sessionId)
+    await Promise.allSettled([
+      entry.transport.close(),
+      entry.server.close()
+    ])
+  }
+
+  async function sweepExpiredSessions(now = Date.now()) {
+    const expired = [...sessions.entries()]
+      .filter(([, entry]) => now - entry.lastAccessedAt >= sessionTtlMs)
+    await Promise.allSettled(expired.map(([sessionId, entry]) => disposeSession(sessionId, entry)))
+  }
+
+  const sweepTimer = setInterval(() => {
+    void sweepExpiredSessions().catch((error) => {
+      logger.error?.('MCP session cleanup failed', { name: error?.name })
+    })
+  }, Math.min(sessionTtlMs, 60 * 1000))
+  sweepTimer.unref?.()
+
   app.post('/mcp', async (request, response) => {
+    await sweepExpiredSessions()
     const requestedSessionId = sessionIdFrom(request)
     let entry = requestedSessionId ? sessions.get(requestedSessionId) : undefined
+    if (entry) entry.lastAccessedAt = Date.now()
 
     if (!entry && !requestedSessionId && isInitializeRequest(request.body)) {
+      if (sessions.size >= maxSessions) {
+        return jsonRpcError(response, 503, -32002, 'MCP session capacity reached')
+      }
       const server = createSmartGovMcpServer(govApiClient)
       let transport
+      const createdEntry = { server, transport: null, lastAccessedAt: Date.now() }
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         enableJsonResponse: true,
         onsessioninitialized(sessionId) {
-          sessions.set(sessionId, { server, transport })
+          createdEntry.lastAccessedAt = Date.now()
+          sessions.set(sessionId, createdEntry)
         }
       })
+      createdEntry.transport = transport
       transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId)
+        if (transport.sessionId && sessions.get(transport.sessionId) === createdEntry) {
+          sessions.delete(transport.sessionId)
+        }
       }
-      entry = { server, transport }
+      entry = createdEntry
       await server.connect(transport)
     } else if (!entry) {
       return jsonRpcError(response, 400, -32000, 'Bad Request: missing or invalid MCP session')
@@ -82,9 +122,11 @@ export function createApp({
   })
 
   const handleEstablishedSession = async (request, response) => {
+    await sweepExpiredSessions()
     const sessionId = sessionIdFrom(request)
     const entry = sessionId ? sessions.get(sessionId) : undefined
     if (!entry) return jsonRpcError(response, 400, -32000, 'Bad Request: invalid MCP session')
+    entry.lastAccessedAt = Date.now()
     try {
       await entry.transport.handleRequest(request, response)
     } catch (error) {
@@ -103,6 +145,7 @@ export function createApp({
   })
 
   async function closeSessions() {
+    clearInterval(sweepTimer)
     const current = [...sessions.values()]
     sessions.clear()
     await Promise.allSettled(current.map(async ({ server, transport }) => {

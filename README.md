@@ -1,131 +1,149 @@
-# 智慧政务助手全栈骨架
+# 智慧政务“一网通办”AI 助手（本地演示）
 
-这是一个面向架构联调的智慧政务助手样例。它使用演示数据跑通 Android、FastAPI、LangChain、MCP、PostgreSQL、Redis、Milvus 和 DeepSeek；不代表真实政务政策或办理结果。
+本仓库是一套可运行的全栈业务演示：群众（个人/企业）、工作人员和管理员可在 Android 本地资产门户中完成事项查询、资格预检、材料与表单、办件审核、预约、模拟核验/缴费/邮寄、咨询转人工、知识维护和审计。后端采用 FastAPI 模块化单体，MCP 作为独立只读服务，PostgreSQL 是事项与办件的权威数据源。
 
-## 组件
+> 所有账号、身份、企业、材料、政策、审核、缴费和邮寄结果均为合成演示数据。本项目没有接入真实政务、短信、支付、人脸、银行或快递平台，不能作为真实办事依据。
 
-- `android/`：复用 HMS Android 工程壳的 WebView + ViewModel + Repository 客户端。
-- `backend/`：Uvicorn/FastAPI、LangChain 编排、数据库、缓存和 RAG。
-- `mcp-server/`：Node MCP Streamable HTTP 服务，包装政务工具。
-- `mock-gov-api/`：可被真实政务 REST API 替换的本地模拟服务。
-- `compose.yaml`：PostgreSQL、Redis、Milvus、etcd、MinIO 与三个应用服务。
-- `scripts/`：密钥初始化、启动、停止、日志和端到端 smoke。
+## 仓库组成
 
-详细调用关系见 `docs/architecture.md`。
+| 目录 | 作用 |
+| --- | --- |
+| `backend/` | FastAPI、边界/协调者/领域/基础设施分层、Alembic、JWT、MinIO、RAG 与受控咨询编排 |
+| `android/` | `com.example.aicompanion` 本地 WebView 门户、原生边界、协调者、网关与 HMS 地图入口 |
+| `mcp-server/` | Node Streamable HTTP MCP，只读调用模拟政务目录 |
+| `mock-gov-api/` | 六个演示事项及材料、流程、窗口 REST 数据 |
+| `compose.yaml` | PostgreSQL 16、Redis 7、Milvus、etcd、MinIO、API、MCP 与 Mock API |
+| `scripts/` | 环境初始化、启动、迁移、业务验收、AI 验收、日志、测试和非破坏性停止 |
+
+设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md) 和 [API 示例](docs/api-examples.md)。
 
 ## 前置条件
 
-1. Windows 11 启用 WSL2，并安装、启动 Docker Desktop 的 Linux 容器后端。
-2. Docker Desktop 建议至少分配 8GB 可用内存；当前 C 盘空间较少，建议把 Docker 磁盘映像放在 D 盘。
-3. Android 构建使用现有 SDK 和 Gradle；不需要启动模拟器或连接真机。
+- Windows 11、WSL2 与 Docker Desktop（Linux 容器后端）。Milvus 建议为 Docker Desktop 预留至少 8 GB 内存和 15 GB 磁盘。
+- PowerShell 5.1 或 7；Android 构建还需要 Android SDK/Gradle。
+- 外层 `key-list.txt` 中存在拼写为 `deepseeek-key` 的本地 DeepSeek 测试密钥。
 
-当前机器若尚未安装 WSL2/Docker，源码测试和 Android 编译仍可执行，但完整 Compose 验收必须等 Docker 可用。
+本阶段不启动 AVD、不安装 APK，也不做手机界面可视化调试。
 
-## 首次启动
+## 初始化与启动
 
-在 PowerShell 中进入本目录：
+在本目录运行：
 
 ```powershell
 .\scripts\init-env.ps1
 .\scripts\dev-up.ps1
-.\scripts\smoke.ps1
 ```
 
-`init-env.ps1` 兼容 Windows PowerShell 5.1 与 PowerShell 7；它从项目外层 `key-list.txt` 的 `deepseeek-key` 条目读取 DeepSeek 密钥，生成随机数据库密码、MinIO 凭据和内部 Token，并写入被忽略的 `.env`。脚本不会输出任何密钥值；已有 `.env` 时会保留现有值，并只补齐旧配置中缺失的随机 MinIO 凭据。不要直接轮换 `.env` 中的 PostgreSQL 密码，因为已有数据卷中的数据库密码不会自动同步。
+`init-env.ps1` 将 DeepSeek 密钥安全映射为 `DEEPSEEK_API_KEY`，并随机生成数据库、JWT、MinIO 与内部服务凭据。脚本不会打印密钥；`.env` 已忽略提交。已有 `.env` 只补齐缺项，避免改动现有 PostgreSQL 数据卷对应的密码。
 
-查看状态和日志：
+检查服务：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health/ready | ConvertTo-Json -Depth 10
 .\scripts\logs.ps1
 ```
 
-停止服务但保留数据卷：
+API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`。其他依赖默认仅在 Compose 网络中可达。
+
+## 演示账号
+
+管理员和工作人员由启动种子幂等创建，群众账号通过注册接口创建。只有在需要人工输入账号时才显式运行：
+
+```powershell
+.\scripts\show-demo-accounts.ps1
+```
+
+该命令会在当前终端显示本地管理员/工作人员凭据；不要截图、复制到日志或用于云端。`business-smoke.ps1` 会从 `.env` 读取凭据并仅输出状态汇总，不打印密码、Token、材料哈希或表单内容。
+
+角色与申请人类型是两个维度：权限角色为 `CITIZEN/STAFF/ADMIN`；个人和企业群众分别使用 `INDIVIDUAL/ENTERPRISE`，企业不是管理员角色。
+
+## 演示目录与业务
+
+种子目录包含六个已发布演示事项：社会保障卡申领、居民身份证丢失补领、个体工商户设立登记、企业社会保险登记、劳动合同备案、单位住房公积金缴存登记与演示缴付。它们覆盖：
+
+- 受限 JSON 规则资格预检和 JSON Schema 动态表单；
+- 必需、条件必需、可选材料，PDF/JPEG/PNG 单文件不超过 10 MB；
+- MinIO 私有材料、SHA-256 完整性、`NOT_SCANNED_DEMO` 明示状态；
+- 乐观锁版本与 `Idempotency-Key`；
+- 部门内工作人员认领、补正、驳回、批准和办结；
+- 本地模拟预约、身份核验、缴费失败/重试/取消与邮寄推进/取消；
+- 公开事项 AI 咨询、`local_catalog + MCP + RAG` 三类溯源、SSE、反馈与转人工取消/解决；
+- 管理员部门/窗口/人员、事项版本生命周期、知识索引恢复/重试/归档、审计和指标。
+
+LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或事项状态。私人身份、表单、材料和办件数据不会进入公共 Redis 检索缓存或 LLM 上下文。
+
+## 验收与测试
+
+不调用 DeepSeek 的完整业务 smoke：
+
+```powershell
+.\scripts\business-smoke.ps1
+```
+
+脚本注册一次随机合成群众账号，完成“社会保障卡申领”的资格预检、两份合成 PDF 上传、提交、工作人员两阶段认领/审批/办结、群众时间线和管理员指标检查；随后只对本轮创建的数据验证模拟邮寄取消、转人工取消，以及合成知识上传后归档。全程不调用 DeepSeek，不删除既有数据库或对象存储数据。
+
+仅在最后需要付费验收时运行 AI smoke：
+
+```powershell
+.\scripts\smoke.ps1
+```
+
+默认先从公开目录精确选择 `DEMO-SS-CARD-001`，再携带其内部 `service_id` 发起一次真实 DeepSeek 调用；响应必须同时包含 PostgreSQL `local_catalog`、MCP 和 RAG 三类来源，并检查该事项外部映射对应的精确 Redis v2 缓存键。脚本不输出答案、会话、密钥或 Token。只有显式传入 `-SecondPaidCall` 才会发起第二次模型调用并验证 `cache_hit`。
+
+源码级测试：
+
+```powershell
+.\scripts\test-all.ps1
+# 首次安装本地依赖：
+.\scripts\test-all.ps1 -InstallDependencies
+```
+
+测试包含全部 PowerShell AST 校验、Python 单元测试、Mock/MCP Node 检查和测试，以及 Android `lintDebug`、JVM 测试和 `assembleDebug`。不会启动模拟器、安装 APK 或截图。若只检查非 Android 代码，可使用 `-SkipAndroid`。
+
+迁移状态与非破坏升级：
+
+```powershell
+.\scripts\migrate.ps1 -StatusOnly
+.\scripts\migrate.ps1
+```
+
+启动时 API 也会执行 `alembic upgrade head`。迁移保留 `0001_initial` 的匿名聊天，新增字段允许为空；脚本不会 downgrade、删表或删除数据卷。
+
+## 主要 API
+
+| 分组 | 说明 | 认证 |
+| --- | --- | --- |
+| `GET /health/live`、`GET /health/ready` | 进程存活与全栈依赖就绪 | 否 |
+| `POST /api/v1/chat`、`POST /api/v1/chat/stream` | 普通/SSE 咨询；可带 `service_id`，私人办件查询还可带 `application_id` | 公开事项可匿名 |
+| `/api/v1/auth/*` | 演示验证码、个人/企业注册、登录、刷新、登出、当前账号 | 按接口 |
+| `/api/v1/services/*` | 事项、资格、材料、流程、表单、窗口 | 公开 |
+| `/api/v1/applications/*` | 草稿、表单、材料、提交、补正、撤回、丢弃、时间线、邮寄 | 群众；授权人员可读 |
+| `/api/v1/consultations/*` | 历史、反馈、转人工、消息和发起人取消 | 登录 |
+| `/api/v1/staff/*` | 待办、认领、审核、办结和人工咨询 | 工作人员 |
+| `/api/v1/admin/*` | 组织、人员、账号、事项版本、知识上传/重试/归档、审计、指标 | 管理员 |
+| `/api/v1/appointments/*`、`/payments/*`、`/verifications/*`、`/deliveries/*` | 预约与本地模拟能力；群众可取消未终结支付/邮寄，到场和配送由所属部门人员推进 | 按操作 |
+
+所有提交、审核、预约、缴费等写操作都使用唯一 `Idempotency-Key`；并发编辑以响应中的 `version` 为准，版本或状态冲突返回 409。统一错误语义和请求示例见 [API 示例](docs/api-examples.md)。
+
+## Android 构建与安全边界
+
+```powershell
+Set-Location .\android
+D:\AndroidDev\gradle-8.14.5\bin\gradle.bat :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
+```
+
+debug API 默认是 `http://10.0.2.2:8000`，可通过 `-PgovApiBase=http://<局域网地址>:8000` 覆盖。仅 debug 允许本地明文 HTTP；release 默认指向无效 HTTPS 占位地址。
+
+WebView 只加载受信任的本地资产。JS Bridge 仅暴露校验后的命令封包、材料选择、语音开始/停止和窗口地图；HTTP 与 Token 均由原生网关处理。Token 使用 Android Keystore 加密存储，不进入 WebView、日志或明文 SharedPreferences。HMS 地图只接受后端校验后的 `window_id`。
+
+沿用的 AG Connect 身份和包名为 `com.example.aicompanion`，因此 APK 会被 Android 视作旧应用的同一包，本阶段只验证构建。
+
+## 停止、数据与上云边界
 
 ```powershell
 .\scripts\dev-down.ps1
 ```
 
-不启动 Docker 的源码级测试：
+普通停止保留所有命名卷。`docker compose down --volumes` 会不可恢复地删除 PostgreSQL、Redis、Milvus 和 MinIO 数据，自动化脚本不会执行它。
 
-```powershell
-.\scripts\test-all.ps1
-```
-
-首次需要安装 Python/Node 依赖时使用 `-InstallDependencies`；该脚本只编译 Android，不启动模拟器或安装 APK。
-
-## API
-
-### 存活检查
-
-```http
-GET /health/live
-```
-
-### 全栈就绪检查
-
-```http
-GET /health/ready
-```
-
-只有 PostgreSQL、Redis、Milvus、MCP 和模拟政务 API 全部健康时才返回就绪。
-
-### 政务问答
-
-```http
-POST /api/v1/chat
-Content-Type: application/json
-
-{
-  "session_id": "可选 UUID",
-  "message": "办理社会保障卡需要哪些材料？"
-}
-```
-
-响应包含 `request_id`、`session_id`、`answer`、`sources`、`tool_calls`、`cache_hit` 和 `warnings`。MCP 或 Milvus 单项不可用时允许降级，并通过 `warnings` 明示；DeepSeek 失败不会被模板答案掩盖。
-
-## 本地端口
-
-| 服务 | 地址 | 说明 |
-| --- | --- | --- |
-| FastAPI | `127.0.0.1:8000` | Android 模拟器对应 `10.0.2.2:8000` |
-| PostgreSQL | `127.0.0.1:15432` | 避开本机旧 PostgreSQL 的 5432 |
-
-Redis、Milvus、MCP、模拟政务 API、etcd 与 MinIO 默认仅在 Compose 内网开放；通过 FastAPI 的就绪检查和 smoke 脚本验证其连通性。
-
-## Android 构建
-
-APK 只做编译与接口层测试，不做界面可视化调试：
-
-```powershell
-Set-Location .\android
-D:\AndroidDev\gradle-8.14.5\bin\gradle.bat :app:testDebugUnitTest :app:assembleDebug
-```
-
-debug 后端默认地址是 `http://10.0.2.2:8000`，可在构建时覆盖：
-
-```powershell
-D:\AndroidDev\gradle-8.14.5\bin\gradle.bat :app:assembleDebug -PgovApiBase=http://192.168.1.10:8000
-```
-
-仅 debug 变体允许为本地联调使用明文 HTTP；主源码中的 release 网络策略默认拒绝明文流量。
-
-沿用的 `agconnect-services.json` 属于 `com.example.aicompanion`；此 APK 会被 Android 视作旧应用的同一包，当前阶段不安装验证。
-
-## 安全边界
-
-- DeepSeek、数据库和内部服务密钥只存在于 `.env`/容器环境，不进入 APK、日志或 API 响应。
-- Huawei MaaS key 与 cloud-server key 未被使用，也不会注入任何容器。
-- WebView 只加载本地可信资产并限制导航；所有后端请求由原生 Repository 发起。
-- 模拟政务数据均带 `is_demo=true`，答案必须保留演示性质提示。
-- 上云前必须增加 HTTPS、正式身份认证、用户数据隔离、云端 Secret Manager 和真实 embedding。
-
-## 数据清理
-
-普通停止不会删除数据。若确实需要清空本地数据库和向量数据，请在确认目标项目无误后手动执行：
-
-```powershell
-docker compose down --volumes
-```
-
-该命令不可恢复，自动化脚本不会默认执行它。
+上云前必须替换本地 JWT/`.env`、模拟 Provider 和 Mock API，增加 HTTPS、正式身份与租户隔离、云端密钥管理、病毒扫描、真实 embedding，以及真实平台所需的授权、审计和合规评估。非 `ENVIRONMENT=local` 环境不得启用演示 Provider。

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.llm import SYSTEM_PROMPT, build_messages
-from app.schemas import Source, ToolCall
+from app.application.dtos import SourceData as Source, ToolCallData as ToolCall
 
 
 def test_prompt_contains_question_context_and_safety_rule() -> None:
@@ -22,4 +22,3 @@ def test_prompt_contains_question_context_and_safety_rule() -> None:
     assert "不可信数据" in str(messages[0].content)
     assert "补办身份证需要什么" in str(messages[1].content)
     assert "get_material_checklist" in str(messages[1].content)
-

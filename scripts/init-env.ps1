@@ -22,27 +22,62 @@ function New-LocalSecret {
 }
 
 if (Test-Path -LiteralPath $envPath) {
+    $existingLines = @(Get-Content -LiteralPath $envPath)
     $existingNames = @(
-        Get-Content -LiteralPath $envPath | ForEach-Object {
+        $existingLines | ForEach-Object {
             if ($_ -match '^([A-Z0-9_]+)=') { $Matches[1] }
         }
     )
-    $missingMinio = @()
+    $missingValues = @()
     if ($existingNames -notcontains "MINIO_ROOT_USER") {
-        $missingMinio += "MINIO_ROOT_USER=smartgov$((New-LocalSecret).Substring(0, 16))"
+        $missingValues += "MINIO_ROOT_USER=smartgov$((New-LocalSecret).Substring(0, 16))"
     }
     if ($existingNames -notcontains "MINIO_ROOT_PASSWORD") {
-        $missingMinio += "MINIO_ROOT_PASSWORD=$(New-LocalSecret)"
+        $missingValues += "MINIO_ROOT_PASSWORD=$(New-LocalSecret)"
     }
-    if ($missingMinio.Count -gt 0) {
-        $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
-        $writer = New-Object System.IO.StreamWriter($envPath, $true, $utf8WithoutBom)
-        try {
-            foreach ($line in $missingMinio) { $writer.WriteLine($line) }
-        } finally {
-            $writer.Dispose()
+    $requiredLocalValues = [ordered]@{
+        MINIO_ENDPOINT = "http://minio:9000"
+        MATERIALS_BUCKET = "smart-gov-materials"
+        KNOWLEDGE_BUCKET = "smart-gov-knowledge"
+        MAX_MATERIAL_BYTES = "10485760"
+        JWT_SIGNING_KEY = (New-LocalSecret)
+        JWT_ACCESS_MINUTES = "15"
+        JWT_REFRESH_DAYS = "7"
+        PII_HMAC_KEY = (New-LocalSecret)
+        PII_ENCRYPTION_KEY = (New-LocalSecret)
+        ENABLE_DEMO_PROVIDERS = "true"
+        DEMO_SMS_CODE = "000000"
+        DEMO_ADMIN_USERNAME = "admin.demo"
+        DEMO_ADMIN_PASSWORD = "DemoA!$(New-LocalSecret)"
+        DEMO_STAFF_USERNAME = "staff.demo"
+        DEMO_STAFF_PASSWORD = "DemoS!$(New-LocalSecret)"
+        MCP_SESSION_TTL_MS = "900000"
+        MCP_MAX_SESSIONS = "128"
+    }
+    foreach ($entry in $requiredLocalValues.GetEnumerator()) {
+        $hasLegacyMaterialLimit = $entry.Key -eq "MAX_MATERIAL_BYTES" -and $existingNames -contains "MAX_UPLOAD_BYTES"
+        if ($existingNames -notcontains $entry.Key -and -not $hasLegacyMaterialLimit) {
+            $missingValues += "$($entry.Key)=$($entry.Value)"
         }
-        Write-Host "Missing randomized MinIO credentials were added; values were not displayed."
+    }
+    $settingsUpgraded = $false
+    $updatedLines = @(
+        $existingLines | ForEach-Object {
+            if ($_ -eq "MILVUS_COLLECTION=gov_knowledge_v1") {
+                $settingsUpgraded = $true
+                "MILVUS_COLLECTION=gov_knowledge_v2"
+            } elseif ($_ -like "MAX_UPLOAD_BYTES=*") {
+                $settingsUpgraded = $true
+                $_ -replace '^MAX_UPLOAD_BYTES=', 'MAX_MATERIAL_BYTES='
+            } else {
+                $_
+            }
+        }
+    )
+    if ($missingValues.Count -gt 0 -or $settingsUpgraded) {
+        $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllLines($envPath, @($updatedLines + $missingValues), $utf8WithoutBom)
+        Write-Host "Missing local business settings were added or upgraded; secret values were not displayed."
     } else {
         Write-Host "Local .env already exists and was left unchanged."
     }
@@ -85,12 +120,29 @@ $content = @(
     "REDIS_URL=redis://redis:6379/0"
     "CACHE_TTL_SECONDS=300"
     "MILVUS_URI=http://milvus:19530"
-    "MILVUS_COLLECTION=gov_knowledge_v1"
+    "MILVUS_COLLECTION=gov_knowledge_v2"
     "MINIO_ROOT_USER=$minioUser"
     "MINIO_ROOT_PASSWORD=$minioPassword"
+    "MINIO_ENDPOINT=http://minio:9000"
+    "MATERIALS_BUCKET=smart-gov-materials"
+    "KNOWLEDGE_BUCKET=smart-gov-knowledge"
+    "MAX_MATERIAL_BYTES=10485760"
+    "JWT_SIGNING_KEY=$(New-LocalSecret)"
+    "JWT_ACCESS_MINUTES=15"
+    "JWT_REFRESH_DAYS=7"
+    "PII_HMAC_KEY=$(New-LocalSecret)"
+    "PII_ENCRYPTION_KEY=$(New-LocalSecret)"
+    "ENABLE_DEMO_PROVIDERS=true"
+    "DEMO_SMS_CODE=000000"
+    "DEMO_ADMIN_USERNAME=admin.demo"
+    "DEMO_ADMIN_PASSWORD=DemoA!$(New-LocalSecret)"
+    "DEMO_STAFF_USERNAME=staff.demo"
+    "DEMO_STAFF_PASSWORD=DemoS!$(New-LocalSecret)"
     "MCP_URL=http://mcp-server:3000/mcp"
     "MCP_HEALTH_URL=http://mcp-server:3000/health"
     "MCP_INTERNAL_TOKEN=$mcpToken"
+    "MCP_SESSION_TTL_MS=900000"
+    "MCP_MAX_SESSIONS=128"
     "GOV_API_BASE_URL=http://mock-gov-api:8080"
     "GOV_API_TOKEN=$govApiToken"
     "LLM_MODE=deepseek"

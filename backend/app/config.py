@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = Field(default=300, ge=1, le=86_400)
 
     milvus_uri: str = "http://milvus:19530"
-    milvus_collection: str = "gov_knowledge"
+    milvus_collection: str = "gov_knowledge_v2"
     milvus_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
 
     mcp_url: str = "http://mcp-server:3000/mcp"
@@ -44,8 +44,30 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=1, ge=0, le=3)
     seed_on_startup: bool = True
 
+    jwt_signing_key: SecretStr = SecretStr("local-demo-signing-key-change-before-deployment")
+    jwt_access_minutes: int = Field(default=15, ge=1, le=1440)
+    jwt_refresh_days: int = Field(default=7, ge=1, le=90)
+    enable_demo_providers: bool = True
+    demo_sms_code: SecretStr = SecretStr("000000")
+    demo_admin_username: str = "demo_admin"
+    demo_admin_password: SecretStr = SecretStr("AdminDemo!2026")
+    demo_staff_username: str = "demo_staff"
+    demo_staff_password: SecretStr = SecretStr("StaffDemo!2026")
+
+    minio_endpoint: str = "http://minio:9000"
+    minio_access_key: SecretStr = Field(
+        default=SecretStr("minioadmin"),
+        validation_alias=AliasChoices("MINIO_ACCESS_KEY", "MINIO_ROOT_USER"),
+    )
+    minio_secret_key: SecretStr = Field(
+        default=SecretStr("minioadmin"),
+        validation_alias=AliasChoices("MINIO_SECRET_KEY", "MINIO_ROOT_PASSWORD"),
+    )
+    materials_bucket: str = "smart-gov-materials"
+    knowledge_bucket: str = "smart-gov-knowledge"
+    max_material_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

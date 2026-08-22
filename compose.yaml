@@ -111,6 +111,8 @@ services:
     environment:
       PORT: "3000"
       MCP_INTERNAL_TOKEN: ${MCP_INTERNAL_TOKEN:?Run scripts/init-env.ps1 first}
+      MCP_SESSION_TTL_MS: ${MCP_SESSION_TTL_MS:-900000}
+      MCP_MAX_SESSIONS: ${MCP_MAX_SESSIONS:-128}
       GOV_API_BASE_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
       GOV_API_TOKEN: ${GOV_API_TOKEN:?Run scripts/init-env.ps1 first}
     healthcheck:
@@ -132,11 +134,28 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
-      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-gov_knowledge_v1}
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-gov_knowledge_v2}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?Run scripts/init-env.ps1 first}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Run scripts/init-env.ps1 first}
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MAX_MATERIAL_BYTES: ${MAX_MATERIAL_BYTES:-10485760}
       MCP_URL: ${MCP_URL:-http://mcp-server:3000/mcp}
       MCP_HEALTH_URL: ${MCP_HEALTH_URL:-http://mcp-server:3000/health}
       MOCK_GOV_API_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
       MCP_INTERNAL_TOKEN: ${MCP_INTERNAL_TOKEN:?Run scripts/init-env.ps1 first}
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Run scripts/init-env.ps1 first}
+      JWT_ACCESS_MINUTES: ${JWT_ACCESS_MINUTES:-15}
+      JWT_REFRESH_DAYS: ${JWT_REFRESH_DAYS:-7}
+      PII_HMAC_KEY: ${PII_HMAC_KEY:?Run scripts/init-env.ps1 first}
+      PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?Run scripts/init-env.ps1 first}
+      ENABLE_DEMO_PROVIDERS: ${ENABLE_DEMO_PROVIDERS:-true}
+      DEMO_SMS_CODE: ${DEMO_SMS_CODE:-000000}
+      DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-admin.demo}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?Run scripts/init-env.ps1 first}
+      DEMO_STAFF_USERNAME: ${DEMO_STAFF_USERNAME:-staff.demo}
+      DEMO_STAFF_PASSWORD: ${DEMO_STAFF_PASSWORD:?Run scripts/init-env.ps1 first}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?Run scripts/init-env.ps1 first}
       LLM_MODE: ${LLM_MODE:-deepseek}
       LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
@@ -155,6 +174,8 @@ services:
       redis:
         condition: service_healthy
       milvus:
+        condition: service_healthy
+      minio:
         condition: service_healthy
       mcp-server:
         condition: service_healthy

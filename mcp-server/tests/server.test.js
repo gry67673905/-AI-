@@ -12,6 +12,7 @@ let fakeGovBaseUrl
 let mcpHttpServer
 let mcpBaseUrl
 let closeSessions
+let sessions
 let observedGovAuthorization
 
 function listen(server) {
@@ -52,7 +53,32 @@ before(async () => {
       return response.end(JSON.stringify({
         item_id: 1001,
         required: [{ name: '有效身份证件', required: true }],
+        conditional: [],
         optional: [],
+        is_demo: true
+      }))
+    }
+    if (url.pathname === '/services/1001/process') {
+      return response.end(JSON.stringify({
+        item_id: 1001,
+        steps: [{ order: 1, code: 'SUBMIT', name: '提交申请' }],
+        appointment: { supported: true, required: false },
+        fee: { required: false, amount_yuan: 0 },
+        delivery: { options: ['WINDOW_PICKUP', 'DEMO_MAIL'] },
+        is_demo: true
+      }))
+    }
+    if (url.pathname === '/services/1001/windows') {
+      const windowId = url.searchParams.get('window_id')
+      return response.end(JSON.stringify({
+        item_id: 1001,
+        windows: [{
+          id: windowId || 'HRSS-CENTER-01',
+          name: '演示市民服务中心人社窗口',
+          coordinate_type: 'DEMO_GCJ02',
+          is_demo: true
+        }],
+        total: 1,
         is_demo: true
       }))
     }
@@ -69,6 +95,7 @@ before(async () => {
     logger: { error() {} }
   })
   closeSessions = created.closeSessions
+  sessions = created.sessions
   mcpHttpServer = http.createServer(created.app)
   await listen(mcpHttpServer)
   mcpBaseUrl = `http://127.0.0.1:${mcpHttpServer.address().port}`
@@ -97,7 +124,7 @@ describe('MCP Streamable HTTP server', () => {
     assert.equal((await response.json()).error.code, -32001)
   })
 
-  test('lists and calls exactly the three read-only tools with one result wrapper', async () => {
+  test('lists and calls exactly the five read-only tools with one result wrapper', async () => {
     const client = new Client({ name: 'mcp-test-client', version: '0.1.0' })
     const transport = new StreamableHTTPClientTransport(new URL(`${mcpBaseUrl}/mcp`), {
       requestInit: { headers: { authorization: `Bearer ${MCP_TOKEN}` } }
@@ -108,7 +135,13 @@ describe('MCP Streamable HTTP server', () => {
       const listed = await client.listTools()
       assert.deepEqual(
         listed.tools.map((tool) => tool.name).sort(),
-        ['get_material_checklist', 'get_service_details', 'search_services']
+        [
+          'get_material_checklist',
+          'get_process_navigation',
+          'get_service_details',
+          'get_window_info',
+          'search_services'
+        ]
       )
       assert.ok(listed.tools.every((tool) => tool.annotations?.readOnlyHint === true))
 
@@ -133,9 +166,90 @@ describe('MCP Streamable HTTP server', () => {
         arguments: { itemId: 1001 }
       })
       assert.equal(JSON.parse(materials.content[0].text).required.length, 1)
+
+      const processNavigation = await client.callTool({
+        name: 'get_process_navigation',
+        arguments: { itemId: 1001 }
+      })
+      assert.equal(processNavigation.content.length, 1)
+      const processPayload = JSON.parse(processNavigation.content[0].text)
+      assert.equal(processPayload.steps[0].code, 'SUBMIT')
+      assert.equal(processPayload.content, undefined)
+
+      const windowInfo = await client.callTool({
+        name: 'get_window_info',
+        arguments: { itemId: 1001, windowId: 'HRSS-CENTER-01' }
+      })
+      assert.equal(windowInfo.content.length, 1)
+      const windowPayload = JSON.parse(windowInfo.content[0].text)
+      assert.equal(windowPayload.windows[0].id, 'HRSS-CENTER-01')
+      assert.equal(windowPayload.content, undefined)
       assert.equal(observedGovAuthorization, `Bearer ${GOV_TOKEN}`)
     } finally {
+      await transport.terminateSession()
       await client.close()
+    }
+    assert.equal(sessions.size, 0)
+  })
+
+  test('rejects new sessions at capacity and releases capacity after termination', async () => {
+    const created = createApp({
+      internalToken: MCP_TOKEN,
+      govApiBaseUrl: fakeGovBaseUrl,
+      govApiToken: GOV_TOKEN,
+      maxSessions: 1,
+      logger: { error() {} }
+    })
+    const server = http.createServer(created.app)
+    await listen(server)
+    const url = new URL(`http://127.0.0.1:${server.address().port}/mcp`)
+    const first = new Client({ name: 'capacity-one', version: '0.1.0' })
+    const firstTransport = new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { authorization: `Bearer ${MCP_TOKEN}` } }
+    })
+    const second = new Client({ name: 'capacity-two', version: '0.1.0' })
+    const secondTransport = new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { authorization: `Bearer ${MCP_TOKEN}` } }
+    })
+    try {
+      await first.connect(firstTransport)
+      assert.equal(created.sessions.size, 1)
+      await assert.rejects(second.connect(secondTransport))
+      assert.equal(created.sessions.size, 1)
+      await firstTransport.terminateSession()
+      await first.close()
+      assert.equal(created.sessions.size, 0)
+    } finally {
+      await second.close().catch(() => {})
+      await created.closeSessions()
+      await close(server)
+    }
+  })
+
+  test('expires an abandoned idle session', async () => {
+    const created = createApp({
+      internalToken: MCP_TOKEN,
+      govApiBaseUrl: fakeGovBaseUrl,
+      govApiToken: GOV_TOKEN,
+      sessionTtlMs: 30,
+      logger: { error() {} }
+    })
+    const server = http.createServer(created.app)
+    await listen(server)
+    const client = new Client({ name: 'ttl-client', version: '0.1.0' })
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${server.address().port}/mcp`),
+      { requestInit: { headers: { authorization: `Bearer ${MCP_TOKEN}` } } }
+    )
+    try {
+      await client.connect(transport)
+      assert.equal(created.sessions.size, 1)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      assert.equal(created.sessions.size, 0)
+    } finally {
+      await client.close().catch(() => {})
+      await created.closeSessions()
+      await close(server)
     }
   })
 })

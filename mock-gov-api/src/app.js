@@ -50,36 +50,82 @@ export function createApp({ token, logger = console } = {}) {
     response.json({ items, total: items.length, is_demo: true })
   })
 
-  app.get('/services/:id', (request, response, next) => {
-    if (request.path.endsWith('/materials')) return next()
+  function findService(request, response) {
     const id = Number(request.params.id)
     const service = services.find((item) => item.id === id)
     if (!service) {
-      return response.status(404).json({
+      response.status(404).json({
         error: { code: 'service_not_found', message: `未找到事项 ID ${request.params.id}。` },
         is_demo: true
       })
+      return null
     }
-    response.json({ service, is_demo: true })
-  })
+    return service
+  }
 
   app.get('/services/:id/materials', (request, response) => {
-    const id = Number(request.params.id)
-    const service = services.find((item) => item.id === id)
-    if (!service) {
+    const service = findService(request, response)
+    if (!service) return
+    response.json({
+      item_id: service.id,
+      item_name: service.name,
+      required: service.materials.filter((item) => item.requirement === 'REQUIRED'),
+      conditional: service.materials.filter((item) => item.requirement === 'CONDITIONAL'),
+      optional: service.materials.filter((item) => item.requirement === 'OPTIONAL'),
+      notice: service.notice,
+      is_demo: true
+    })
+  })
+
+  app.get('/services/:id/process', (request, response) => {
+    const service = findService(request, response)
+    if (!service) return
+    response.json({
+      item_id: service.id,
+      item_name: service.name,
+      processing_time: service.processing_time,
+      steps: service.process_steps,
+      appointment: service.appointment,
+      fee: service.fee,
+      delivery: service.delivery,
+      notice: service.notice,
+      is_demo: true
+    })
+  })
+
+  app.get('/services/:id/windows', (request, response) => {
+    const service = findService(request, response)
+    if (!service) return
+    const windowId = typeof request.query.window_id === 'string' ? request.query.window_id.trim() : ''
+    if (windowId.length > 64) {
+      return response.status(400).json({
+        error: { code: 'invalid_query', message: '窗口 ID 不能超过 64 个字符。' },
+        is_demo: true
+      })
+    }
+    const windows = windowId
+      ? service.windows.filter((item) => item.id === windowId)
+      : service.windows
+    if (windowId && windows.length === 0) {
       return response.status(404).json({
-        error: { code: 'service_not_found', message: `未找到事项 ID ${request.params.id}。` },
+        error: { code: 'window_not_found', message: `未找到窗口 ID ${windowId}。` },
         is_demo: true
       })
     }
     response.json({
       item_id: service.id,
       item_name: service.name,
-      required: service.materials.filter((item) => item.required),
-      optional: service.materials.filter((item) => !item.required),
-      notice: service.notice,
+      windows,
+      total: windows.length,
+      map_notice: '坐标、地址、电话和服务时间均为演示数据。',
       is_demo: true
     })
+  })
+
+  app.get('/services/:id', (request, response) => {
+    const service = findService(request, response)
+    if (!service) return
+    response.json({ service, is_demo: true })
   })
 
   app.use((request, response) => {

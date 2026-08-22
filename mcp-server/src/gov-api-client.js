@@ -71,4 +71,14 @@ export class GovApiClient {
   getMaterialChecklist(itemId) {
     return this.request(`services/${encodeURIComponent(itemId)}/materials`)
   }
+
+  getProcessNavigation(itemId) {
+    return this.request(`services/${encodeURIComponent(itemId)}/process`)
+  }
+
+  getWindowInfo(itemId, windowId = '') {
+    return this.request(`services/${encodeURIComponent(itemId)}/windows`, {
+      window_id: windowId
+    })
+  }
 }

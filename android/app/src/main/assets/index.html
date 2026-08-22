@@ -4,33 +4,222 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-    <title>智慧政务助手</title>
+          content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>智慧政务一网办助手</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<header class="app-header">
+    <div>
+        <p class="eyebrow">演示系统 · 非真实政务平台</p>
+        <h1>智慧政务一网办助手</h1>
+        <p id="native-status" class="muted">正在连接 Android 原生服务…</p>
+    </div>
+    <div class="user-box">
+        <span id="role-badge" class="badge">访客</span>
+        <strong id="display-name">未登录</strong>
+        <button id="logout-button" class="quiet" type="button" hidden>退出登录</button>
+    </div>
+</header>
+
+<div id="global-alert" class="alert" role="alert" hidden></div>
+
+<nav id="primary-nav" aria-label="工作台导航"></nav>
+
 <main>
-    <header>
-        <h1>智慧政务助手</h1>
-        <p id="native-status">正在连接 Android 服务…</p>
-    </header>
-
-    <form id="chat-form">
-        <label for="message">请输入要咨询的政务事项</label>
-        <textarea id="message" maxlength="1000" required
-                  placeholder="例如：补办身份证需要准备哪些材料？"></textarea>
-        <div class="actions">
-            <button id="submit" type="submit">发送问题</button>
-            <button id="map" type="button" class="secondary">打开 HMS 地图</button>
+    <section id="section-consultation" class="workspace" data-section="consultation">
+        <div class="section-heading">
+            <div><p class="eyebrow">AI 咨询</p><h2>政策与办事咨询</h2></div>
+            <span class="demo-label">回答仅供演示参考</span>
         </div>
-    </form>
+        <form id="chat-form">
+            <label for="chat-message">请输入要咨询的事项</label>
+            <textarea id="chat-message" maxlength="1000" required placeholder="例如：补办身份证需要准备哪些材料？"></textarea>
+            <div class="button-row">
+                <button id="chat-send" type="submit" data-native-action>发送问题</button>
+                <button id="voice-start" type="button" class="secondary" data-native-action>开始语音</button>
+                <button id="voice-stop" type="button" class="quiet" data-native-action>停止语音</button>
+            </div>
+            <p id="voice-status" class="muted">原始音频不会上传到政务后端。</p>
+        </form>
+        <article class="result-card" aria-live="polite">
+            <h3>助手答复</h3>
+            <p id="chat-answer">答复将在这里显示。</p>
+            <details><summary>来源与调用信息</summary><pre id="chat-metadata">暂无</pre></details>
+        </article>
+        <div class="citizen-only compact-grid" hidden>
+            <form id="handoff-form" class="card">
+                <h3>转人工咨询</h3>
+                <label for="handoff-session">咨询会话编号</label>
+                <input id="handoff-session" required>
+                <label for="handoff-reason">问题说明</label>
+                <input id="handoff-reason" maxlength="500" required>
+                <button type="submit" data-native-action>提交人工队列</button>
+            </form>
+            <form id="feedback-form" class="card">
+                <h3>咨询评价</h3>
+                <label for="feedback-session">会话编号</label>
+                <input id="feedback-session" required>
+                <label for="feedback-rating">评分（1–5）</label>
+                <input id="feedback-rating" type="number" min="1" max="5" value="5" required>
+                <label for="feedback-comment">评价说明</label>
+                <input id="feedback-comment" maxlength="1000">
+                <button type="submit" data-native-action>提交评价</button>
+            </form>
+            <form id="handoff-message-form" class="card">
+                <h3>人工咨询消息</h3>
+                <label for="citizen-ticket-id">工单编号</label><input id="citizen-ticket-id" required>
+                <label for="citizen-handoff-content">消息内容</label><textarea id="citizen-handoff-content" maxlength="2000"></textarea>
+                <div class="button-row wrap"><button id="handoff-messages" type="button" data-native-action>查看消息</button><button id="handoff-message-add" type="button" class="secondary" data-native-action>发送消息</button><button id="handoff-cancel" type="button" class="danger" data-native-action>取消转人工</button><button id="consultation-history" type="button" class="quiet" data-native-action>咨询历史</button></div>
+            </form>
+        </div>
+    </section>
 
-    <section aria-live="polite" aria-atomic="true">
-        <h2>答复</h2>
-        <p id="answer">响应会显示在这里。</p>
-        <pre id="metadata" hidden></pre>
+    <section id="section-services" class="workspace" data-section="services" hidden>
+        <div class="section-heading"><div><p class="eyebrow">办事指南</p><h2>事项服务目录</h2></div></div>
+        <form id="service-search-form" class="toolbar">
+            <label class="grow" for="service-query">关键词</label>
+            <input id="service-query" class="grow" placeholder="身份证、社保、营业执照">
+            <label for="service-applicant">申请主体</label>
+            <select id="service-applicant"><option value="">全部</option><option value="INDIVIDUAL">个人</option><option value="ENTERPRISE">企业</option></select>
+            <button type="submit" data-native-action>搜索</button>
+        </form>
+        <div id="service-results" class="card-list"><p class="muted">输入关键词查询六类演示事项。</p></div>
+        <form id="service-action-form" class="card">
+            <h3>事项详情与资格预检</h3>
+            <label for="service-id">事项编号</label>
+            <input id="service-id" required placeholder="从搜索结果选择或输入编号">
+            <label for="eligibility-json">预检条件（JSON）</label>
+            <textarea id="eligibility-json" class="code-input">{}</textarea>
+            <div class="button-row wrap">
+                <button id="service-details" type="button" data-native-action>详情</button>
+                <button id="service-eligibility" type="button" data-native-action>资格预检</button>
+                <button id="service-materials" type="button" data-native-action>材料清单</button>
+                <button id="service-process" type="button" data-native-action>办理流程</button>
+                <button id="service-form-schema" type="button" data-native-action>表单定义</button>
+                <button id="service-windows" type="button" data-native-action>服务窗口</button>
+            </div>
+        </form>
+        <form id="window-map-form" class="card inline-form">
+            <label for="window-id">在地图查看窗口（仅传窗口编号）</label>
+            <input id="window-id" required>
+            <button type="submit" class="secondary" data-native-action>打开 HMS 地图</button>
+        </form>
+    </section>
+
+    <section id="section-login" class="workspace" data-section="login" hidden>
+        <div class="section-heading"><div><p class="eyebrow">本地演示账号</p><h2>登录与群众注册</h2></div></div>
+        <div class="compact-grid">
+            <form id="login-form" class="card">
+                <h3>账号登录</h3>
+                <label for="login-account">手机号 / 账号</label>
+                <input id="login-account" autocomplete="username" required>
+                <label for="login-password">密码</label>
+                <input id="login-password" type="password" autocomplete="current-password" required>
+                <button type="submit" data-native-action>登录</button>
+                <p class="muted">JWT 仅由原生 Keystore 保存，不会返回本页面。</p>
+            </form>
+            <form id="register-form" class="card">
+                <h3>个人 / 企业注册</h3>
+                <label for="register-account">手机号 / 账号</label>
+                <input id="register-account" autocomplete="username" required>
+                <label for="register-name">显示名称</label>
+                <input id="register-name" required>
+                <label for="register-type">主体类型</label>
+                <select id="register-type"><option value="INDIVIDUAL">个人</option><option value="ENTERPRISE">企业</option></select>
+                <label for="register-password">密码</label>
+                <input id="register-password" type="password" autocomplete="new-password" minlength="8" required>
+                <label for="register-code">演示验证码</label>
+                <div class="inline-form"><input id="register-code" required><button id="send-code" type="button" class="quiet" data-native-action>获取验证码</button></div>
+                <button type="submit" data-native-action>注册</button>
+            </form>
+        </div>
+    </section>
+
+    <section id="section-applications" class="workspace citizen-only" data-section="applications" hidden>
+        <div class="section-heading"><div><p class="eyebrow">群众工作台</p><h2>我的办件</h2></div></div>
+        <div class="compact-grid">
+            <form id="application-create-form" class="card">
+                <h3>创建草稿</h3><label for="application-service-id">事项编号</label><input id="application-service-id" required>
+                <button type="submit" data-native-action>创建</button>
+                <button id="application-list" type="button" class="quiet" data-native-action>刷新我的办件</button>
+            </form>
+            <form id="application-detail-form" class="card">
+                <h3>查看办件</h3><label for="application-id">办件编号</label><input id="application-id" required>
+                <label for="application-version">当前版本号</label><input id="application-version" type="number" min="1" value="1" required>
+                <div class="button-row wrap"><button id="application-details" type="button" data-native-action>详情</button><button id="application-timeline" type="button" data-native-action>时间线</button><button id="application-withdraw" type="button" class="danger" data-native-action>撤回已提交办件</button><button id="application-discard" type="button" class="quiet" data-native-action>丢弃草稿</button></div>
+            </form>
+        </div>
+        <form id="application-form-update" class="card">
+            <h3>动态表单与材料</h3>
+            <label for="application-form-json">表单数据（JSON）</label><textarea id="application-form-json" class="code-input">{}</textarea>
+            <div class="button-row wrap"><button id="application-save-form" type="button" data-native-action>保存表单</button><button id="application-submit" type="button" data-native-action>提交办件</button></div>
+            <label for="requirement-id">材料要求编号</label><input id="requirement-id">
+            <button id="material-pick" type="button" class="secondary" data-native-action>选择 PDF/JPEG/PNG 材料（≤10MB）</button>
+        </form>
+        <div class="compact-grid">
+            <form id="appointment-form" class="card"><h3>预约窗口</h3><label for="appointment-service">事项编号</label><input id="appointment-service" required><label for="appointment-window">窗口编号</label><input id="appointment-window" required><label for="appointment-time">预约时间</label><input id="appointment-time" type="datetime-local" required><button type="submit" data-native-action>预约</button><label for="appointment-id">预约编号</label><input id="appointment-id"><div class="button-row wrap"><button id="appointment-list" type="button" class="quiet" data-native-action>我的预约</button><button id="appointment-cancel" type="button" class="danger" data-native-action>取消预约</button></div></form>
+            <form id="payment-form" class="card"><h3>演示支付</h3><label for="payment-application">办件编号</label><input id="payment-application" required><button id="payment-create" type="button" data-native-action>创建支付单</button><label for="payment-id">支付单编号</label><input id="payment-id"><div class="button-row wrap"><button id="payment-confirm" type="button" class="secondary" data-native-action>确认模拟支付</button><button id="payment-cancel" type="button" class="danger" data-native-action>取消支付单</button></div></form>
+            <form id="verification-form" class="card"><h3>演示人脸核验</h3><label for="verification-application">办件编号</label><input id="verification-application" required><button id="verification-create" type="button" data-native-action>创建核验</button><label for="verification-id">核验编号</label><input id="verification-id"><button id="verification-confirm" type="button" class="secondary" data-native-action>确认模拟通过</button><p class="muted">不采集或保存真实生物信息。</p></form>
+            <form id="delivery-form" class="card"><h3>演示邮寄</h3><p class="muted">仅适用于事项目录中标明支持“DEMO_MAIL”的事项；电子结果不等同于邮寄。</p><label for="delivery-recipient">收件人（合成数据）</label><input id="delivery-recipient" required><label for="delivery-address">演示地址</label><input id="delivery-address" required><button type="submit" data-native-action>设置邮寄方式</button><label for="delivery-id">邮寄单编号</label><input id="delivery-id"><button id="delivery-cancel" type="button" class="danger" data-native-action>取消邮寄单</button></form>
+        </div>
+    </section>
+
+    <section id="section-staff_tasks" class="workspace staff-only" data-section="staff_tasks" hidden>
+        <div class="section-heading"><div><p class="eyebrow">工作人员工作台</p><h2>审核待办</h2></div><button id="staff-load-tasks" type="button" data-native-action>刷新待办</button></div>
+        <div class="compact-grid">
+            <form id="staff-claim-form" class="card"><h3>认领任务</h3><label for="staff-task-id">任务编号</label><input id="staff-task-id" required><button type="submit" data-native-action>认领</button></form>
+            <form id="staff-review-form" class="card"><h3>办件处理</h3><label for="staff-application-id">办件编号</label><input id="staff-application-id" required><label for="staff-version">当前版本号</label><input id="staff-version" type="number" min="1" value="1" required><label for="staff-reason">意见 / 补正要求</label><textarea id="staff-reason" maxlength="1000"></textarea><label><input id="staff-require-payment" type="checkbox"> 批准后需要模拟缴费</label><div class="button-row wrap"><button id="staff-supplement" type="button" data-native-action>要求补正</button><button id="staff-approve" type="button" data-native-action>批准</button><button id="staff-reject" type="button" class="danger" data-native-action>驳回</button><button id="staff-complete" type="button" class="secondary" data-native-action>办结</button></div></form>
+        </div>
+    </section>
+
+    <section id="section-staff_handoffs" class="workspace staff-only" data-section="staff_handoffs" hidden>
+        <div class="section-heading"><div><p class="eyebrow">人工咨询</p><h2>转人工队列</h2></div><button id="staff-load-handoffs" type="button" data-native-action>刷新队列</button></div>
+        <form id="staff-handoff-reply-form" class="card"><label for="staff-ticket-id">工单编号</label><input id="staff-ticket-id" required><label for="staff-reply">回复</label><textarea id="staff-reply" required maxlength="2000"></textarea><div class="button-row wrap"><button type="submit" data-native-action>发送回复</button><button id="staff-handoff-resolve" type="button" class="secondary" data-native-action>结束人工咨询</button></div></form>
+    </section>
+
+    <section id="section-admin_overview" class="workspace admin-only" data-section="admin_overview" hidden>
+        <div class="section-heading"><div><p class="eyebrow">管理员工作台</p><h2>运营概览</h2></div><button id="admin-metrics" type="button" data-native-action>刷新指标</button></div>
+        <p>统计仅来自本地合成演示数据。</p>
+    </section>
+
+    <section id="section-admin_catalog" class="workspace admin-only" data-section="admin_catalog" hidden>
+        <div class="section-heading"><div><p class="eyebrow">事项管理</p><h2>版本与生命周期</h2></div><button id="admin-services" type="button" data-native-action>刷新事项</button></div>
+        <div class="compact-grid">
+            <form id="admin-service-form" class="card"><h3>新建事项草稿</h3><label for="admin-service-name">事项名称</label><input id="admin-service-name" required><label for="admin-service-code">事项代码</label><input id="admin-service-code" required><label for="admin-service-department">部门编号</label><input id="admin-service-department" required><label for="admin-service-applicant">申请主体</label><select id="admin-service-applicant"><option value="INDIVIDUAL">个人</option><option value="ENTERPRISE">企业</option></select><label for="admin-service-summary">事项说明</label><textarea id="admin-service-summary" required></textarea><button type="submit" data-native-action>创建草稿</button></form>
+            <form id="admin-lifecycle-form" class="card"><h3>生命周期操作</h3><label for="admin-service-id">事项编号</label><input id="admin-service-id" required><label for="admin-lifecycle-action">目标状态</label><select id="admin-lifecycle-action"><option value="PUBLISHED">发布 / 恢复</option><option value="SUSPENDED">暂停</option><option value="RETIRED">终止</option></select><label for="admin-version-id">发布版本编号（发布时填写）</label><input id="admin-version-id"><button type="submit" data-native-action>执行</button><label for="admin-version-json">新版本配置（JSON）</label><textarea id="admin-version-json" class="code-input">{"title":"演示事项新版本","summary":"合成演示数据","form_schema":{}}</textarea><button id="admin-version-create" type="button" class="secondary" data-native-action>创建不可变版本</button></form>
+        </div>
+    </section>
+
+    <section id="section-admin_people" class="workspace admin-only" data-section="admin_people" hidden>
+        <div class="section-heading"><div><p class="eyebrow">组织与账号</p><h2>人员管理</h2></div><div class="button-row wrap"><button id="admin-departments" type="button" data-native-action>部门</button><button id="admin-windows" type="button" data-native-action>窗口</button><button id="admin-accounts" type="button" data-native-action>账号</button></div></div>
+        <div class="compact-grid">
+            <form id="admin-staff-form" class="card"><h3>创建工作人员</h3><label for="admin-staff-account">账号</label><input id="admin-staff-account" required><label for="admin-staff-password">初始密码</label><input id="admin-staff-password" type="password" minlength="8" required><label for="admin-staff-name">姓名</label><input id="admin-staff-name" required><label for="admin-department-id">部门编号</label><input id="admin-department-id" required><label for="admin-staff-window">窗口编号（可选）</label><input id="admin-staff-window"><button type="submit" data-native-action>创建</button></form>
+            <form id="admin-freeze-form" class="card"><h3>冻结 / 解冻账号</h3><label for="admin-user-id">账号编号</label><input id="admin-user-id" required><label><input id="admin-freeze-value" type="checkbox" checked> 冻结</label><button type="submit" class="danger" data-native-action>更新账号状态</button></form>
+            <form id="admin-department-form" class="card"><h3>新建部门</h3><label for="admin-department-code">部门代码</label><input id="admin-department-code" required><label for="admin-department-name">部门名称</label><input id="admin-department-name" required><button type="submit" data-native-action>创建部门</button></form>
+            <form id="admin-window-form" class="card"><h3>新建窗口</h3><label for="admin-window-department">部门编号</label><input id="admin-window-department" required><label for="admin-window-code">窗口代码</label><input id="admin-window-code" required><label for="admin-window-name">窗口名称</label><input id="admin-window-name" required><label for="admin-window-address">演示地址</label><input id="admin-window-address" required><label for="admin-window-latitude">纬度</label><input id="admin-window-latitude" type="number" step="any" required><label for="admin-window-longitude">经度</label><input id="admin-window-longitude" type="number" step="any" required><button type="submit" data-native-action>创建窗口</button></form>
+        </div>
+    </section>
+
+    <section id="section-admin_knowledge" class="workspace admin-only" data-section="admin_knowledge" hidden>
+        <div class="section-heading"><div><p class="eyebrow">知识运营</p><h2>政策资料索引</h2></div></div>
+        <div class="card"><p>支持 PDF、DOCX、TXT、Markdown；演示环境不提供病毒扫描。</p><button id="knowledge-pick" type="button" data-native-action>选择知识资料（≤10MB）</button><label for="admin-knowledge-job">知识索引任务编号</label><input id="admin-knowledge-job" placeholder="上传结果或失败详情会自动回填，也可手工输入"><div class="button-row wrap"><button id="admin-knowledge-retry" type="button" class="secondary" data-native-action>重试索引</button><button id="admin-knowledge-archive" type="button" class="danger" data-native-action>归档知识</button></div></div>
+    </section>
+
+    <section id="section-admin_audit" class="workspace admin-only" data-section="admin_audit" hidden>
+        <div class="section-heading"><div><p class="eyebrow">安全审计</p><h2>业务事件</h2></div><button id="admin-audit" type="button" data-native-action>刷新审计</button></div>
+    </section>
+
+    <section id="section-profile" class="workspace authenticated-only" data-section="profile" hidden>
+        <div class="section-heading"><div><p class="eyebrow">账号</p><h2>当前身份</h2></div></div><pre id="profile-output"></pre>
+    </section>
+
+    <section class="workspace activity-panel">
+        <div class="section-heading"><div><p class="eyebrow">联调信息</p><h2>最近操作结果</h2></div><button id="activity-clear" class="quiet" type="button">清空</button></div>
+        <pre id="activity-output">等待操作。</pre>
     </section>
 </main>
+
 <script src="app.js"></script>
 </body>
 </html>

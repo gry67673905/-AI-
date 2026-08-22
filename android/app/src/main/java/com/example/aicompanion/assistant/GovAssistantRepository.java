@@ -5,12 +5,17 @@ import com.example.aicompanion.assistant.ChatContract.ChatError;
 import com.example.aicompanion.assistant.ChatContract.ChatRequest;
 import com.example.aicompanion.assistant.ChatContract.ChatResponse;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 import com.google.gson.JsonSyntaxException;
 
 import java.io.IOException;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -96,11 +101,9 @@ public final class GovAssistantRepository implements ChatDataSource {
                         return;
                     }
                     if (!response.isSuccessful()) {
-                        callback.onError(new ChatError(
-                            response.code(),
-                            "http_error",
-                            sanitize(extractApiMessage(body, "政务服务暂时不可用"))
-                        ));
+                        ParsedApiError parsedError = parseApiError(body, "政务服务暂时不可用");
+                        callback.onError(new ChatError(response.code(), parsedError.code,
+                            parsedError.message, parsedError.details));
                         return;
                     }
 
@@ -146,27 +149,90 @@ public final class GovAssistantRepository implements ChatDataSource {
             : sanitized.substring(0, MAX_ERROR_LENGTH) + "…";
     }
 
-    private static String extractApiMessage(String body, String fallback) {
-        if (isBlank(body)) return fallback;
+    private static ParsedApiError parseApiError(String body, String fallback) {
+        String code = "http_error";
+        String message = fallback;
+        JsonElement details = JsonNull.INSTANCE;
+        if (isBlank(body)) return new ParsedApiError(code, message, details);
         try {
             JsonElement root = JsonParser.parseString(body);
-            if (!root.isJsonObject()) return fallback;
+            if (!root.isJsonObject()) return new ParsedApiError(code, message, details);
             JsonObject object = root.getAsJsonObject();
-            String detail = primitiveString(object.get("detail"));
-            if (!isBlank(detail)) return detail;
-            String message = primitiveString(object.get("message"));
-            if (!isBlank(message)) return message;
+            String rootCode = primitiveString(object.get("code"));
+            if (!isBlank(rootCode)) code = rootCode;
+            String rootMessage = primitiveString(object.get("message"));
+            if (!isBlank(rootMessage)) message = rootMessage;
+            JsonElement rootDetails = firstPresent(object, "detail", "details");
+            if (rootDetails != null && !rootDetails.isJsonNull()) {
+                String text = primitiveString(rootDetails);
+                if (!isBlank(text)) message = text;
+                else details = sanitizeDetails(rootDetails, 0);
+            }
             JsonElement errorValue = object.get("error");
             String error = primitiveString(errorValue);
-            if (!isBlank(error)) return error;
+            if (!isBlank(error)) message = error;
             if (errorValue != null && errorValue.isJsonObject()) {
-                String nestedMessage = primitiveString(errorValue.getAsJsonObject().get("message"));
-                if (!isBlank(nestedMessage)) return nestedMessage;
+                JsonObject nested = errorValue.getAsJsonObject();
+                String nestedCode = primitiveString(nested.get("code"));
+                if (!isBlank(nestedCode)) code = nestedCode;
+                String nestedMessage = primitiveString(nested.get("message"));
+                if (!isBlank(nestedMessage)) message = nestedMessage;
+                JsonElement nestedDetails = firstPresent(nested, "detail", "details");
+                if (nestedDetails != null && !nestedDetails.isJsonNull()) {
+                    details = sanitizeDetails(nestedDetails, 0);
+                }
             }
-            return fallback;
         } catch (RuntimeException ignored) {
-            return fallback;
+            return new ParsedApiError(code, sanitize(message), details);
         }
+        return new ParsedApiError(sanitize(code), sanitize(message), details);
+    }
+
+    private static JsonElement firstPresent(JsonObject object, String first, String second) {
+        JsonElement value = object.get(first);
+        return value == null || value.isJsonNull() ? object.get(second) : value;
+    }
+
+    private static JsonElement sanitizeDetails(JsonElement value, int depth) {
+        if (value == null || value.isJsonNull() || depth > 5) return JsonNull.INSTANCE;
+        if (value.isJsonObject()) {
+            JsonObject output = new JsonObject();
+            for (Map.Entry<String, JsonElement> entry : value.getAsJsonObject().entrySet()) {
+                if (isSensitiveKey(entry.getKey())) continue;
+                output.add(entry.getKey(), sanitizeDetails(entry.getValue(), depth + 1));
+            }
+            return output;
+        }
+        if (value.isJsonArray()) {
+            JsonArray output = new JsonArray();
+            int count = 0;
+            for (JsonElement item : value.getAsJsonArray()) {
+                if (count++ >= 32) break;
+                output.add(sanitizeDetails(item, depth + 1));
+            }
+            return output;
+        }
+        JsonPrimitive primitive = value.getAsJsonPrimitive();
+        if (primitive.isString()) return new JsonPrimitive(sanitize(primitive.getAsString()));
+        if (primitive.isBoolean()) return new JsonPrimitive(primitive.getAsBoolean());
+        if (primitive.isNumber()) return new JsonPrimitive(primitive.getAsNumber());
+        return JsonNull.INSTANCE;
+    }
+
+    private static boolean isSensitiveKey(String key) {
+        if (key == null) return false;
+        String normalized = key.trim().toLowerCase(Locale.ROOT).replace('-', '_');
+        return normalized.equals("authorization")
+            || normalized.equals("password")
+            || normalized.equals("verification_code")
+            || normalized.equals("api_key")
+            || normalized.equals("secret")
+            || normalized.equals("token")
+            || normalized.equals("credential")
+            || normalized.endsWith("_token")
+            || normalized.endsWith("_password")
+            || normalized.endsWith("_secret")
+            || normalized.endsWith("_credential");
     }
 
     private static String primitiveString(JsonElement value) {
@@ -184,5 +250,17 @@ public final class GovAssistantRepository implements ChatDataSource {
         String trimmed = value.trim();
         while (trimmed.endsWith("/")) trimmed = trimmed.substring(0, trimmed.length() - 1);
         return trimmed;
+    }
+
+    private static final class ParsedApiError {
+        final String code;
+        final String message;
+        final JsonElement details;
+
+        ParsedApiError(String code, String message, JsonElement details) {
+            this.code = code;
+            this.message = message;
+            this.details = details == null ? JsonNull.INSTANCE : details;
+        }
     }
 }

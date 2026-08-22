@@ -15,6 +15,7 @@ from app.llm import LLMService
 from app.mcp_client import MCPGovClient
 from app.milvus import MilvusRAG
 from app.schemas import HealthCheck
+from app.infrastructure.runtime import BusinessRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -45,11 +46,22 @@ class AppServices:
             settings.llm_timeout_seconds,
             settings.llm_max_retries,
         )
+        self.business = BusinessRuntime(
+            settings,
+            self.database.sessions,
+            self.database,
+            self.cache,
+            self.mcp,
+            self.milvus,
+            self.llm,
+        )
         self._http = httpx.AsyncClient(
             timeout=settings.dependency_health_timeout_seconds,
             trust_env=False,
         )
         self._seed_failures: set[str] = set()
+        self._seed_retry_lock = asyncio.Lock()
+        self._seed_retry_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def startup(self) -> None:
         if not self.settings.seed_on_startup:
@@ -57,9 +69,10 @@ class AppServices:
         outcomes = await asyncio.gather(
             self.database.seed_knowledge(DEMO_DOCUMENTS),
             self.milvus.ensure_seed(DEMO_DOCUMENTS),
+            self.business.startup(),
             return_exceptions=True,
         )
-        for name, outcome in zip(("postgres", "milvus"), outcomes, strict=True):
+        for name, outcome in zip(("postgres", "milvus", "business"), outcomes, strict=True):
             if isinstance(outcome, BaseException):
                 self._seed_failures.add(name)
                 logger.warning("Startup seed for %s failed: %s", name, type(outcome).__name__)
@@ -82,15 +95,77 @@ class AppServices:
 
     async def _postgres_ready(self) -> None:
         await self.database.ping()
-        if self.settings.seed_on_startup and "postgres" in self._seed_failures:
-            await self.database.seed_knowledge(DEMO_DOCUMENTS)
-            self._seed_failures.discard("postgres")
+        await self._retry_failed_seed(
+            "postgres", lambda: self.database.seed_knowledge(DEMO_DOCUMENTS)
+        )
 
     async def _milvus_ready(self) -> None:
         await self.milvus.ping()
-        if self.settings.seed_on_startup and "milvus" in self._seed_failures:
-            await self.milvus.ensure_seed(DEMO_DOCUMENTS)
-            self._seed_failures.discard("milvus")
+        await self._retry_failed_seed(
+            "milvus", lambda: self.milvus.ensure_seed(DEMO_DOCUMENTS)
+        )
+
+    async def _business_ready(self) -> None:
+        # Business startup includes the catalogue/accounts seed and MinIO bucket
+        # creation. A transient startup failure must remain visible and retryable;
+        # a healthy object-store socket alone is not sufficient readiness.
+        await self.business.object_store.ping()
+        await self._retry_failed_seed("business", self.business.startup)
+
+    def _ensure_seed_retry_state(self) -> None:
+        """Initialize retry state for lightweight test doubles made via ``__new__``."""
+        if not hasattr(self, "_seed_retry_lock"):
+            self._seed_retry_lock = asyncio.Lock()
+        if not hasattr(self, "_seed_retry_tasks"):
+            self._seed_retry_tasks = {}
+
+    @staticmethod
+    def _observe_seed_task(task: asyncio.Task[None]) -> None:
+        """Retrieve background exceptions when a readiness waiter times out."""
+        if not task.cancelled():
+            task.exception()
+
+    async def _run_seed_retry(
+        self,
+        name: str,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        succeeded = False
+        try:
+            await operation()
+            succeeded = True
+        finally:
+            async with self._seed_retry_lock:
+                if succeeded:
+                    self._seed_failures.discard(name)
+                else:
+                    self._seed_failures.add(name)
+                current = asyncio.current_task()
+                if self._seed_retry_tasks.get(name) is current:
+                    self._seed_retry_tasks.pop(name, None)
+
+    async def _retry_failed_seed(
+        self,
+        name: str,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        if not self.settings.seed_on_startup:
+            return
+        self._ensure_seed_retry_state()
+        async with self._seed_retry_lock:
+            if name not in self._seed_failures:
+                return
+            task = self._seed_retry_tasks.get(name)
+            if task is None:
+                task = asyncio.create_task(
+                    self._run_seed_retry(name, operation),
+                    name=f"seed-retry-{name}",
+                )
+                task.add_done_callback(self._observe_seed_task)
+                self._seed_retry_tasks[name] = task
+
+        # A probe timeout must not cancel the shared retry for all other waiters.
+        await asyncio.shield(task)
 
     async def readiness(self) -> dict[str, HealthCheck]:
         probes: dict[str, Callable[[], Awaitable[None]]] = {
@@ -99,6 +174,8 @@ class AppServices:
             "milvus": self._milvus_ready,
             "mcp": self.mcp.ping,
             "mock_gov_api": self._mock_api_ping,
+            "minio": self.business.object_store.ping,
+            "business_seed": self._business_ready,
         }
 
         async def run_probe(probe: Callable[[], Awaitable[None]]) -> HealthCheck:

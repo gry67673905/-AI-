@@ -1,36 +1,42 @@
 package com.example.aicompanion;
 
-import android.content.Intent;
-import android.os.Build;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
-import android.text.TextUtils;
-import android.webkit.CookieManager;
-import android.webkit.JavascriptInterface;
-import android.webkit.WebSettings;
 import android.webkit.WebView;
-import android.widget.Toast;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.lifecycle.ViewModelProvider;
-import androidx.webkit.WebViewAssetLoader;
 
-import com.example.aicompanion.assistant.AssistantViewModel;
-import com.example.aicompanion.assistant.ChatContract.ChatError;
-import com.example.aicompanion.assistant.ChatContract.ChatResponse;
-import com.example.aicompanion.assistant.GovAssistantRepository;
 import com.example.aicompanion.core.HmsCoreHelper;
+import com.example.aicompanion.portal.PortalGraph;
+import com.example.aicompanion.portal.boundary.DocumentPickerBoundary;
+import com.example.aicompanion.portal.boundary.PortalJsBoundary;
+import com.example.aicompanion.portal.boundary.SecureWebViewHost;
+import com.example.aicompanion.portal.boundary.TextToSpeechBoundary;
+import com.example.aicompanion.portal.boundary.VoiceCaptureBoundary;
+import com.example.aicompanion.portal.boundary.WindowMapBoundary;
+import com.example.aicompanion.portal.business.RoleNavigationPolicy;
+import com.example.aicompanion.portal.coordinator.PortalCoordinatorViewModel;
+import com.example.aicompanion.portal.model.PortalContract.SelectedDocument;
+import com.example.aicompanion.portal.model.PortalContract.UiState;
 import com.example.aicompanion.web.SecureAssetWebViewClient;
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
-import java.lang.ref.WeakReference;
-
-public final class MainActivity extends AppCompatActivity {
-    private static final String BRIDGE_NAME = "GovAssistantNative";
-
+/** Thin lifecycle host. Business decisions and HTTP calls live outside the Activity. */
+public final class MainActivity extends AppCompatActivity implements PortalJsBoundary.Host {
     private final Gson gson = new Gson();
-    private WebView assistantWebView;
-    private AssistantViewModel viewModel;
+    private final RoleNavigationPolicy navigationPolicy = new RoleNavigationPolicy();
+
+    private WebView portalWebView;
+    private PortalCoordinatorViewModel viewModel;
+    private DocumentPickerBoundary documentPicker;
+    private VoiceCaptureBoundary voiceCapture;
+    private TextToSpeechBoundary speechOutput;
+    private WindowMapBoundary windowMap;
+    private UiState lastState;
     private boolean pageReady;
 
     @Override
@@ -38,122 +44,148 @@ public final class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        viewModel = new ViewModelProvider(
-            this,
-            new AssistantViewModel.Factory(new GovAssistantRepository())
-        ).get(AssistantViewModel.class);
+        PortalGraph graph = PortalGraph.create(getApplicationContext());
+        viewModel = new ViewModelProvider(this, graph.viewModelFactory()).get(PortalCoordinatorViewModel.class);
+        documentPicker = new DocumentPickerBoundary(this, documentListener());
+        voiceCapture = new VoiceCaptureBoundary(this, voiceListener());
+        speechOutput = new TextToSpeechBoundary(this);
+        windowMap = new WindowMapBoundary(this, graph.catalogGateway(), this::dispatchBoundaryError);
 
-        assistantWebView = findViewById(R.id.assistantWebView);
-        configureSecureWebView(assistantWebView);
-        assistantWebView.loadUrl(SecureAssetWebViewClient.START_URL);
+        portalWebView = findViewById(R.id.assistantWebView);
+        SecureWebViewHost.configure(this, portalWebView, new PortalJsBoundary(this), this::onPageReady);
+        viewModel.state().observe(this, this::onUiState);
+        portalWebView.loadUrl(SecureAssetWebViewClient.START_URL);
     }
 
-    private void configureSecureWebView(WebView webView) {
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setJavaScriptCanOpenWindowsAutomatically(false);
-        settings.setSupportMultipleWindows(false);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
-        settings.setAllowFileAccessFromFileURLs(false);
-        settings.setAllowUniversalAccessFromFileURLs(false);
-        settings.setDomStorageEnabled(false);
-        settings.setDatabaseEnabled(false);
-        settings.setGeolocationEnabled(false);
-        settings.setMediaPlaybackRequiresUserGesture(true);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        settings.setBlockNetworkLoads(true);
-        settings.setSaveFormData(false);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) settings.setSafeBrowsingEnabled(true);
+    @Override
+    public void executeCommand(String envelopeJson) {
+        runOnUiThread(() -> viewModel.executeBridgeCommand(envelopeJson));
+    }
 
-        CookieManager cookies = CookieManager.getInstance();
-        cookies.setAcceptCookie(false);
-        cookies.setAcceptThirdPartyCookies(webView, false);
+    @Override
+    public void chooseDocument(String requestJson) {
+        runOnUiThread(() -> documentPicker.choose(requestJson, viewModel.currentRole()));
+    }
 
-        WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
-            .setDomain("appassets.androidplatform.net")
-            .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
-            .build();
-        webView.setWebViewClient(new SecureAssetWebViewClient(assetLoader, this::onPageReady));
-        webView.addJavascriptInterface(new AssistantBridge(this), BRIDGE_NAME);
+    @Override
+    public void controlVoice(String action) {
+        runOnUiThread(() -> {
+            if ("start".equals(action)) voiceCapture.start();
+            else if ("stop".equals(action)) voiceCapture.stop();
+            else dispatchBoundaryError("invalid_voice_action", "仅支持 start 或 stop 语音命令");
+        });
+    }
+
+    @Override
+    public void openWindowMap(String windowId) {
+        runOnUiThread(() -> windowMap.open(windowId));
     }
 
     private void onPageReady() {
         pageReady = true;
-        dispatch("onNativeReady", gson.toJson(HmsCoreHelper.describe(this)));
+        JsonObject ready = new JsonObject();
+        ready.addProperty("demo", true);
+        ready.addProperty("hms_status", HmsCoreHelper.describe(this));
+        ready.add("user", gson.toJsonTree(viewModel.currentUser()));
+        ready.add("sections", gson.toJsonTree(navigationPolicy.sections(viewModel.currentRole())));
+        ready.addProperty("max_material_bytes", 10L * 1024L * 1024L);
+        dispatch("onNativeReady", ready);
+        if (lastState != null) dispatchState(lastState);
     }
 
-    private void submitMessage(String message) {
-        viewModel.submit(message, new AssistantViewModel.UiCallback() {
-            @Override
-            public void onSuccess(ChatResponse response) {
-                runOnUiThread(() -> dispatch("onNativeResponse", gson.toJson(response)));
-            }
+    private void onUiState(UiState state) {
+        lastState = state;
+        if (pageReady) dispatchState(state);
+        if (state.shouldSpeakAnswer() && viewModel.consumeSpeech(state.getSequence())) {
+            String answer = state.getData() != null && state.getData().isJsonObject()
+                && state.getData().getAsJsonObject().has("answer")
+                ? state.getData().getAsJsonObject().get("answer").getAsString() : "";
+            speechOutput.speak(answer);
+        }
+    }
 
-            @Override
-            public void onError(ChatError error) {
-                JsonObject payload = new JsonObject();
-                payload.addProperty("status_code", error.getStatusCode());
-                payload.addProperty("code", error.getCode());
-                payload.addProperty("message", error.getMessage());
-                runOnUiThread(() -> dispatch("onNativeError", gson.toJson(payload)));
+    private void dispatchState(UiState state) {
+        dispatch("onNativeState", gson.toJsonTree(state));
+    }
+
+    private DocumentPickerBoundary.Listener documentListener() {
+        return new DocumentPickerBoundary.Listener() {
+            @Override public void onSelected(SelectedDocument document) { viewModel.uploadDocument(document); }
+            @Override public void onCancelled() {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "document_cancelled");
+                dispatch("onNativeAux", event);
             }
+            @Override public void onError(String code, String message) { dispatchBoundaryError(code, message); }
+        };
+    }
+
+    private VoiceCaptureBoundary.Listener voiceListener() {
+        return new VoiceCaptureBoundary.Listener() {
+            @Override public void onState(String state) {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "voice_state");
+                event.addProperty("state", state);
+                dispatch("onNativeAux", event);
+            }
+            @Override public void onPartial(String text) {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "voice_partial");
+                event.addProperty("text", text);
+                dispatch("onNativeAux", event);
+            }
+            @Override public void onFinal(String text) {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "voice_final");
+                event.addProperty("text", text);
+                dispatch("onNativeAux", event);
+                viewModel.executeVoiceMessage(text);
+            }
+            @Override public void onError(String code, String message) { dispatchBoundaryError(code, message); }
+        };
+    }
+
+    private void dispatchBoundaryError(String code, String message) {
+        runOnUiThread(() -> {
+            JsonObject event = new JsonObject();
+            event.addProperty("type", "boundary_error");
+            event.addProperty("code", code);
+            event.addProperty("message", message);
+            dispatch("onNativeAux", event);
         });
     }
 
-    private void openMap() {
-        if (!HmsCoreHelper.isAvailable(this)) {
-            HmsCoreHelper.resolve(this, 1001);
-            return;
+    /** Function names are native constants; only JSON data is interpolated. */
+    private void dispatch(String fixedFunction, JsonElement payload) {
+        if (!pageReady || portalWebView == null) return;
+        final String function;
+        switch (fixedFunction) {
+            case "onNativeReady": function = "onNativeReady"; break;
+            case "onNativeState": function = "onNativeState"; break;
+            case "onNativeAux": function = "onNativeAux"; break;
+            default: return;
         }
-        if (TextUtils.isEmpty(BuildConfig.HMS_MAP_API_KEY)) {
-            Toast.makeText(this, "AG Connect 配置中没有可用的 Map API Key", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        startActivity(new Intent(this, HmsMapActivity.class));
+        portalWebView.evaluateJavascript(
+            "window.GovPortal&&window.GovPortal." + function + "(" + gson.toJson(payload) + ");",
+            null
+        );
     }
 
-    private void dispatch(String functionName, String jsonArgument) {
-        if (!pageReady || assistantWebView == null) return;
-        String script = "window.GovAssistant&&window.GovAssistant."
-            + functionName
-            + "("
-            + jsonArgument
-            + ");";
-        assistantWebView.evaluateJavascript(script, null);
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == VoiceCaptureBoundary.RECORD_AUDIO_REQUEST) {
+            voiceCapture.onPermissionResult(grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+        }
     }
 
     @Override
     protected void onDestroy() {
         pageReady = false;
-        if (assistantWebView != null) {
-            assistantWebView.removeJavascriptInterface(BRIDGE_NAME);
-            assistantWebView.stopLoading();
-            assistantWebView.clearHistory();
-            assistantWebView.destroy();
-            assistantWebView = null;
-        }
+        if (voiceCapture != null) voiceCapture.destroy();
+        if (speechOutput != null) speechOutput.destroy();
+        SecureWebViewHost.destroy(portalWebView);
+        portalWebView = null;
         super.onDestroy();
-    }
-
-    /** Only two fixed commands are exposed; callers cannot choose a URL or native method. */
-    private static final class AssistantBridge {
-        private final WeakReference<MainActivity> activityReference;
-
-        private AssistantBridge(MainActivity activity) {
-            activityReference = new WeakReference<>(activity);
-        }
-
-        @JavascriptInterface
-        public void sendMessage(String message) {
-            MainActivity activity = activityReference.get();
-            if (activity != null) activity.runOnUiThread(() -> activity.submitMessage(message));
-        }
-
-        @JavascriptInterface
-        public void openMap() {
-            MainActivity activity = activityReference.get();
-            if (activity != null) activity.runOnUiThread(activity::openMap);
-        }
     }
 }

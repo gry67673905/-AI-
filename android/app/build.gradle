@@ -82,6 +82,7 @@ dependencies {
     implementation libs.androidx.core
     implementation libs.androidx.appcompat
     implementation libs.androidx.lifecycle.viewmodel
+    implementation libs.androidx.lifecycle.livedata
     implementation libs.androidx.webkit
     implementation libs.gson
     implementation libs.okhttp
@@ -92,6 +93,7 @@ dependencies {
 
     testImplementation libs.junit
     testImplementation libs.okhttp.mockwebserver
+    testImplementation libs.androidx.arch.core.testing
 }
 
 tasks.withType(Test).configureEach {

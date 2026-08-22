@@ -29,10 +29,10 @@ android/app/agconnect-services.json
 volumes/
 artifacts/
 logs/
+.runtime-backups/
 
 # IDE / OS
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-
