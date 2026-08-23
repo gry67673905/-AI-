@@ -1,4 +1,4 @@
-# 智慧政务“一网通办”AI 助手（本地演示）
+# 智慧政务“一网通办”AI 助手（演示环境）
 
 本仓库是一套可运行的全栈业务演示：群众（个人/企业）、工作人员和管理员可在 Android 本地资产门户中完成事项查询、资格预检、材料与表单、办件审核、预约、模拟核验/缴费/邮寄、咨询转人工、知识维护和审计。后端采用 FastAPI 模块化单体，MCP 作为独立只读服务，PostgreSQL 是事项与办件的权威数据源。
 
@@ -13,9 +13,10 @@
 | `mcp-server/` | Node Streamable HTTP MCP，只读调用模拟政务目录 |
 | `mock-gov-api/` | 六个演示事项及材料、流程、窗口 REST 数据 |
 | `compose.yaml` | PostgreSQL 16、Redis 7、Milvus、etcd、MinIO、API、MCP 与 Mock API |
+| `compose.cloud.yaml`、`deploy/` | 云端演示 Compose、Docker secrets、HTTPS、备份/回滚和显式付费 RAG 导入脚本 |
 | `scripts/` | 环境初始化、启动、迁移、业务验收、AI 验收、日志、测试和非破坏性停止 |
 
-设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md) 和 [API 示例](docs/api-examples.md)。
+设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md)、[API 示例](docs/api-examples.md) 和 [云端部署手册](docs/cloud-deployment.md)。
 
 ## 前置条件
 
@@ -43,7 +44,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health/ready | ConvertTo-Json -Depth 10
 .\scripts\logs.ps1
 ```
 
-API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`。其他依赖默认仅在 Compose 网络中可达。
+API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；当前 OpenAPI 共 73 个 method/path。默认本地栈未启用团队 RAG，`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。云端启用固定团队数据集后新增 `rag_corpus`，共 8 项，并校验激活别名准确指向 15,858 条内容向量和 1,012 条文档路由向量。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`，其他本地依赖默认仅在 Compose 网络中可达。
 
 ## 演示账号
 
@@ -67,7 +68,7 @@ API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；`/health
 - 乐观锁版本与 `Idempotency-Key`；
 - 部门内工作人员认领、补正、驳回、批准和办结；
 - 本地模拟预约、身份核验、缴费失败/重试/取消与邮寄推进/取消；
-- 公开事项 AI 咨询、`local_catalog + MCP + RAG` 三类溯源、SSE、反馈与转人工取消/解决；
+- 公开事项 AI 咨询、`local_catalog + MCP + RAG` 三类溯源、SSE、反馈与转人工取消/解决；RAG 可融合本地知识与经净化、版本化导入的团队语料；
 - 管理员部门/窗口/人员、事项版本生命周期、知识索引恢复/重试/归档、审计和指标。
 
 LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或事项状态。私人身份、表单、材料和办件数据不会进入公共 Redis 检索缓存或 LLM 上下文。
@@ -88,7 +89,7 @@ LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或�
 .\scripts\smoke.ps1
 ```
 
-默认先从公开目录精确选择 `DEMO-SS-CARD-001`，再携带其内部 `service_id` 发起一次真实 DeepSeek 调用；响应必须同时包含 PostgreSQL `local_catalog`、MCP 和 RAG 三类来源，并检查该事项外部映射对应的精确 Redis v2 缓存键。脚本不输出答案、会话、密钥或 Token。只有显式传入 `-SecondPaidCall` 才会发起第二次模型调用并验证 `cache_hit`。
+默认先从公开目录精确选择 `DEMO-SS-CARD-001`，再携带其内部 `service_id` 发起一次真实 DeepSeek 调用；响应必须同时包含 PostgreSQL `local_catalog`、MCP 和 RAG 三类来源。脚本按 `规范化问题 + 外部事项 ID + dataset 版本` 精确检查 Redis `smart-gov:retrieval:v3:*` 键；本地未启用团队 RAG 时 dataset 为 `none`。脚本不输出答案、会话、密钥或 Token。只有显式传入 `-SecondPaidCall` 才会发起第二次模型调用并验证 `cache_hit`。
 
 源码级测试：
 
@@ -107,7 +108,7 @@ LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或�
 .\scripts\migrate.ps1
 ```
 
-启动时 API 也会执行 `alembic upgrade head`。迁移保留 `0001_initial` 的匿名聊天，新增字段允许为空；脚本不会 downgrade、删表或删除数据卷。
+启动时 API 也会执行 `alembic upgrade head`。当前 head 为 `0005_rag_corpus`，在既有业务表之外增加版本化团队语料、分块检查点与 embedding 缓存；迁移保留 `0001_initial` 的匿名聊天，脚本不会 downgrade、删表或删除数据卷。
 
 ## 主要 API
 
@@ -132,13 +133,13 @@ Set-Location .\android
 D:\AndroidDev\gradle-8.14.5\bin\gradle.bat :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
 ```
 
-debug API 默认是 `http://10.0.2.2:8000`，可通过 `-PgovApiBase=http://<局域网地址>:8000` 覆盖。仅 debug 允许本地明文 HTTP；release 默认指向无效 HTTPS 占位地址。
+当前 debug/release 构建都默认连接 `https://123.249.68.176`，且网络安全配置拒绝明文 HTTP。可用 `-PgovApiBase=https://<域名或IP>` 覆盖，但必须是无用户名、路径、查询和片段的 HTTPS origin，否则构建立即失败。debug APK 生成于 `android/app/build/outputs/apk/debug/app-debug.apk`；本项目只编译和测试，不自动安装 APK、不启动 AVD。
 
 WebView 只加载受信任的本地资产。JS Bridge 仅暴露校验后的命令封包、材料选择、语音开始/停止和窗口地图；HTTP 与 Token 均由原生网关处理。Token 使用 Android Keystore 加密存储，不进入 WebView、日志或明文 SharedPreferences。HMS 地图只接受后端校验后的 `window_id`。
 
 沿用的 AG Connect 身份和包名为 `com.example.aicompanion`，因此 APK 会被 Android 视作旧应用的同一包，本阶段只验证构建。
 
-## 停止、数据与上云边界
+## 停止、数据与云端边界
 
 ```powershell
 .\scripts\dev-down.ps1
@@ -146,4 +147,6 @@ WebView 只加载受信任的本地资产。JS Bridge 仅暴露校验后的命�
 
 普通停止保留所有命名卷。`docker compose down --volumes` 会不可恢复地删除 PostgreSQL、Redis、Milvus 和 MinIO 数据，自动化脚本不会执行它。
 
-上云前必须替换本地 JWT/`.env`、模拟 Provider 和 Mock API，增加 HTTPS、正式身份与租户隔离、云端密钥管理、病毒扫描、真实 embedding，以及真实平台所需的授权、审计和合规评估。非 `ENVIRONMENT=local` 环境不得启用演示 Provider。
+仓库已提供 Linux x86_64 云端演示部署文件：API 仅绑定 `127.0.0.1:18000`，公网由 Nginx 与官方 lego v5.4.0 管理的 Let’s Encrypt `shortlived` IP 证书提供 `https://123.249.68.176`；TCP 80 必须持续开放给无停机 HTTP-01 续期，密钥通过 `deploy/secrets/` 只读挂载。首次部署保持 `RAG_GROUP_ENABLED=false` 并通过 7 项 readiness；确认 DashScope 一次性 embedding 费用后，才可显式运行 `deploy/scripts/import-rag.sh --confirm-paid-import` 导入固定数据集 `team-2026-08-22-v1`，成功后必须通过含 `rag_corpus` 的 8 项 readiness。原始 `RAG_DATABASE .zip` 含废弃凭据及非业务文件，禁止上传；云端只使用忽略提交的净化归档。
+
+完整的 IP 证书、部署、RAG 导入、一次付费 smoke、零额外付费公网验收、流量切换、旧服务备份/恢复和 APK 构建顺序见 [云端部署手册](docs/cloud-deployment.md)。旧 Certbot、域名 TLS-ALPN 脚本仅为历史回退材料，本次 IP 部署禁止调用。这仍是演示环境：Mock API 和 Demo Provider 不是正式政务能力；正式上线前还必须完成真实身份/租户隔离、密钥托管、病毒扫描、授权审计、隐私和合规评估。

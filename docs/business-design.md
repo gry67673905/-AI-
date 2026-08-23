@@ -79,10 +79,10 @@ classDiagram
 | 类别 | 后端主要类 | Android 主要类 | 责任边界 |
 | --- | --- | --- | --- |
 | 边界类 | `AuthHttpBoundary`、`CitizenPortalBoundary`、`StaffWorkbenchBoundary`、`AdminConsoleBoundary`、`OperationsBoundary`、`VoiceStreamBoundary` | `PortalJsBoundary`、`DocumentPickerBoundary`、`VoiceCaptureBoundary`、`TextToSpeechBoundary`、`WindowMapBoundary`、`SecureWebViewHost` | 输入校验、鉴权、协议/文件/SSE 转换和原生能力隔离，不判断业务状态 |
-| 协调者类 | `AuthCoordinator`、`ConsultationCoordinator`、`ApplicationCoordinator`、`ReviewCoordinator`、`CatalogCoordinator`、`HandoffCoordinator`、`AppointmentCoordinator`、`PaymentCoordinator`、`VerificationCoordinator`、`DeliveryCoordinator`、`KnowledgeIndexCoordinator`、`AdminCoordinator`、`IdempotencyCoordinator` | `PortalCoordinatorViewModel`、`AuthCoordinator`、`CitizenCoordinator`、`StaffTaskCoordinator`、`AdminCoordinator`、`VoiceConsultationCoordinator` | 编排完整用例、权限入口、事务、幂等、审计和外部端口调用 |
+| 协调者类 | `AuthCoordinator`、`ConsultationCoordinator`、`ApplicationCoordinator`、`ReviewCoordinator`、`CatalogCoordinator`、`HandoffCoordinator`、`AppointmentCoordinator`、`PaymentCoordinator`、`VerificationCoordinator`、`DeliveryCoordinator`、`KnowledgeIndexCoordinator`、`RagCorpusImportCoordinator`、`AdminCoordinator`、`IdempotencyCoordinator` | `PortalCoordinatorViewModel`、`AuthCoordinator`、`CitizenCoordinator`、`StaffTaskCoordinator`、`AdminCoordinator`、`VoiceConsultationCoordinator` | 编排完整用例、权限入口、事务、幂等、审计和外部端口调用；团队语料导入仅由服务器运维入口触发 |
 | 业务逻辑类 | `ServiceMatcher`、`EligibilityEvaluator`、`MaterialRuleEngine`、`FormValidationService`、`ApplicationStateMachine`、`ReviewDecisionPolicy`、`ServiceLifecyclePolicy`、`AssignmentPolicy`、`HandoffAccessPolicy`、`GroundedAnswerPolicy`、`AuthorizedCaseQueryService`、`PaymentStateMachine`、`HandoffStateMachine`、`AppointmentStateMachine`、`DeliveryStateMachine`、`KnowledgeStateMachine` | `PortalCommandPolicy`、`DynamicFormValidator`、`MaterialCompletionPolicy`、`RoleNavigationPolicy`、`SensitiveDisplayPolicy` | 独立判断资格、材料、状态迁移、部门权限、命令授权和敏感显示 |
 | 实体类 | `Account`、`Department`、`ServiceWindow`、`GovernmentService`、`ServiceVersion`、`Application`、`ReviewTask`、`ApplicationEvent`、`HandoffTicket`、`Appointment`、`PaymentOrder`、`KnowledgeChunk` 等 | `PortalEntities` 中的强类型账户、事项、办件、待办和流式事件 | 表达领域身份和状态，不执行网络、数据库或 UI 操作 |
-| 端口/适配器 | `BusinessRepository`、对象存储、MCP/RAG/LLM 与 Demo Provider | `AuthGateway`、`CatalogGateway`、`ApplicationGateway`、`StaffGateway`、`AdminGateway`、`StreamingGateway` 及 OkHttp/Keystore 实现 | 隔离持久化和外部系统，便于替换云端实现 |
+| 端口/适配器 | `BusinessRepository`、`SqlAlchemyCorpusRepository`、`ReadOnlyRagCorpusArchive`、`VersionedMilvusCorpusIndex`、`DashScopeEmbeddingAdapter`、`CompositeKnowledgeRetriever`、对象存储、MCP/LLM 与 Demo Provider | `AuthGateway`、`CatalogGateway`、`ApplicationGateway`、`StaffGateway`、`AdminGateway`、`StreamingGateway` 及 OkHttp/Keystore 实现 | 隔离持久化和外部系统，便于替换云端实现 |
 
 ## 领域聚合与关系
 
@@ -134,6 +134,9 @@ classDiagram
     class DeliveryOrder
     class KnowledgeChunk
     class KnowledgeIndexJob
+    class KnowledgeDataset
+    class KnowledgeCorpusChunk
+    class KnowledgeEmbeddingCache
     class BusinessAuditEvent
 
     Department "1" --> "*" ServiceWindow
@@ -162,6 +165,8 @@ classDiagram
     Application "1" --> "*" VerificationSession
     Application "1" --> "*" DeliveryOrder
     KnowledgeIndexJob "1" --> "*" KnowledgeChunk
+    KnowledgeDataset "1" --> "*" KnowledgeCorpusChunk
+    KnowledgeCorpusChunk "*" ..> KnowledgeEmbeddingCache : content hash/model/dimension
 ```
 
 `Application` 固定引用提交时的 `ServiceVersion`，因此后续发布新版本不会悄悄改变已有办件规则。`ApplicationEvent` 和 `BusinessAuditEvent` 只追加；“删除”统一表示草稿丢弃、已提交撤回、账号冻结或事项终止。
@@ -296,6 +301,21 @@ stateDiagram-v2
 
 `/admin/knowledge/{job_id}/archive` 只接受 `ACTIVE/SUPERSEDED`。归档保留文档、任务、对象和审计；若没有同文档的其他 ACTIVE 任务，将块标记 `ARCHIVED` 并移出 Milvus。重试或归档成功都会清除公开检索缓存，使下一次咨询重新取证。
 
+### 版本化团队 RAG 数据集
+
+团队语料与管理员知识是两个聚合：前者由服务器运维命令导入，不新增公开或管理员 HTTP 路由。固定净化数据集 `team-2026-08-22-v1` 包含 29 个主题、15,858 个正文分块和 1,012 个去重文档路由；它始终标记为“未核验演示参考”，不能覆盖本地事项权威数据。
+
+```mermaid
+stateDiagram-v2
+    [*] --> INDEXING: 清单/哈希/数量校验通过
+    INDEXING --> ACTIVE: 内容与路由 collection 完整并切换 alias
+    INDEXING --> INDEX_FAILED: embedding/持久化/向量写入失败
+    INDEX_FAILED --> INDEXING: 同版本幂等续传
+    ACTIVE --> [*]
+```
+
+`0005_rag_corpus` 保存数据集清单、每个分块的 `PENDING/INDEXED` 检查点，以及以 `(content_hash, model, dimension)` 唯一约束的 embedding 缓存。导入先离线净化并验证固定 SHA-256，再按批次生成 1,024 维 DashScope 向量；collection 名含 dataset 版本和归档哈希，内容/路由两个 alias 都完成切换后才可通过 `rag_corpus` readiness。失败不会把半成品 alias 暴露给查询，重试复用 PostgreSQL 检查点和已缓存 embedding。
+
 ### 模拟身份核验与邮寄
 
 身份核验为 `CREATED → PASSED/FAILED/EXPIRED`，只存状态，不上传或保存音视频/生物模板。
@@ -324,7 +344,7 @@ stateDiagram-v2
 
 `AuthorizedCaseQueryService` 只允许群众查看自己的办件、工作人员查看所属部门办件、管理员按管理权限查询。模型不能生成或执行任意 SQL；办件问答采用参数化白名单查询，并将结果限制为状态、事项名称等最小必要字段。
 
-`ConsultationCoordinator` 是完整聊天用例协调者：建立上下文、持久化消息、调用公开缓存/MCP/RAG、应用 `GroundedAnswerPolicy`、调用模型并保存结果；HTTP/SSE 边界只负责协议映射。选择具体事项时，协调者从 PostgreSQL 当前已发布版本的 UUID、编码、标题和简介等白名单字段生成 `local_catalog` 来源。Redis 只缓存 MCP/RAG 检索结果，键由规范化问题和外部事项映射 ID 隔离；`local_catalog` 每次重建。
+`ConsultationCoordinator` 是完整聊天用例协调者：建立上下文、持久化消息、调用公开缓存/MCP/RAG、应用 `GroundedAnswerPolicy`、调用模型并保存结果；HTTP/SSE 边界只负责协议映射。选择具体事项时，协调者从 PostgreSQL 当前已发布版本的 UUID、编码、标题和简介等白名单字段生成 `local_catalog` 来源。Redis 只缓存 MCP/RAG 检索结果，v3 键由规范化问题、外部事项映射 ID 和 dataset 版本共同隔离；`local_catalog` 每次重建。组合 RAG 对本地知识和团队语料执行 reciprocal-rank fusion，任一侧失败时返回明确 warning 并使用另一侧。
 
 公开事项的 `local_catalog`、MCP 和 RAG 上下文可进入 LLM；账号资料、私人表单、材料内容、办件详情和身份信息禁止进入公共缓存或模型上下文。存在多个事项候选时，`ServiceMatcher` 返回澄清操作并跳过检索/模型，而不是猜测。
 

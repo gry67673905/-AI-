@@ -20,12 +20,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import okhttp3.OkHttpClient;
 
-/** Optional read-only integration against the running local Compose API. */
+/** Optional read-only integration against the configured cloud API. */
 public class PortalLiveBackendTest {
     @Test
     public void optionalCatalogRoundTripUsesNativeGateway() throws Exception {
         Assume.assumeTrue(Boolean.parseBoolean(System.getProperty("liveBackendTest", "false")));
-        String baseUrl = System.getProperty("liveBackendUrl", "http://127.0.0.1:8000");
+        String baseUrl = System.getProperty("liveBackendUrl", "https://123.249.68.176");
         NativeApiClient api = new NativeApiClient(new OkHttpClient(), baseUrl, new EmptySessionStore());
         JsonObject payload = new JsonObject();
         payload.addProperty("query", "身份证");
@@ -38,7 +38,7 @@ public class PortalLiveBackendTest {
             @Override public void onError(ApiFailure value) { error.set(value); latch.countDown(); }
         });
 
-        assertTrue("local backend timed out", latch.await(10, TimeUnit.SECONDS));
+        assertTrue("configured backend timed out", latch.await(10, TimeUnit.SECONDS));
         assertNull(error.get() == null ? null : error.get().getMessage(), error.get());
         assertNotNull(result.get());
         assertTrue(result.get().isJsonObject());

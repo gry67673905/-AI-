@@ -131,6 +131,12 @@ def create_app(services_override: Any | None = None) -> FastAPI:
             principal = await business.auth.authenticate(token)
         if payload.application_id is not None and principal is None:
             raise AuthenticationRequired("查询办件状态必须登录")
+        quota = getattr(services, "chat_quota", None)
+        if quota is not None:
+            await quota.consume(
+                principal.account_id if principal is not None else None,
+                request.client.host if request.client is not None else "unknown",
+            )
         result = await business.consultations.chat(
             to_chat_command(payload), principal
         )

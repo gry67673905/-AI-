@@ -18,15 +18,18 @@ import okhttp3.OkHttpClient;
 
 public class LiveBackendTest {
     @Test
-    public void optionalLocalBackendRoundTrip() throws Exception {
+    public void optionalConfiguredBackendRoundTrip() throws Exception {
         Assume.assumeTrue(Boolean.parseBoolean(System.getProperty("liveBackendTest", "false")));
-        String baseUrl = System.getProperty("liveBackendUrl", "http://127.0.0.1:8000");
+        String baseUrl = System.getProperty("liveBackendUrl", "https://123.249.68.176");
         GovAssistantRepository repository = new GovAssistantRepository(new OkHttpClient(), baseUrl);
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<ChatResponse> result = new AtomicReference<>();
         AtomicReference<ChatError> error = new AtomicReference<>();
 
-        repository.sendChat(null, "补办身份证需要哪些材料？", new ChatDataSource.Callback() {
+        // “社保怎么办” deliberately matches more than one demo service. The
+        // backend returns its deterministic clarification response before the
+        // LLM boundary, so this live transport test never incurs model usage.
+        repository.sendChat(null, "社保怎么办", new ChatDataSource.Callback() {
             @Override
             public void onSuccess(ChatResponse response) {
                 result.set(response);
@@ -40,8 +43,9 @@ public class LiveBackendTest {
             }
         });
 
-        assertTrue("local backend timed out", latch.await(60, TimeUnit.SECONDS));
+        assertTrue("configured backend timed out", latch.await(60, TimeUnit.SECONDS));
         assertNull(error.get() == null ? null : error.get().getMessage(), error.get());
         assertFalse(result.get().getAnswer().trim().isEmpty());
+        assertTrue(result.get().isClarificationRequired());
     }
 }

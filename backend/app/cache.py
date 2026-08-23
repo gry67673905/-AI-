@@ -12,7 +12,9 @@ from app.security import redact_pii_text, redact_sensitive
 
 
 class RetrievalCache:
-    def __init__(self, url: str, ttl_seconds: int):
+    def __init__(
+        self, url: str, ttl_seconds: int, dataset_version: str = "none"
+    ):
         self.client = Redis.from_url(
             url,
             decode_responses=True,
@@ -20,19 +22,29 @@ class RetrievalCache:
             socket_timeout=3,
         )
         self.ttl_seconds = ttl_seconds
+        self.dataset_version = (dataset_version or "none").strip()[:64]
 
     @staticmethod
-    def key_for(message: str, public_context_id: str | int | None = None) -> str:
-        normalized = f"{normalize_text(message)}|service:{public_context_id or 'none'}"
+    def key_for(
+        message: str,
+        public_context_id: str | int | None = None,
+        dataset_version: str = "none",
+    ) -> str:
+        normalized = (
+            f"{normalize_text(message)}|service:{public_context_id or 'none'}"
+            f"|dataset:{(dataset_version or 'none').strip()[:64]}"
+        )
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        return f"smart-gov:retrieval:v2:{digest}"
+        return f"smart-gov:retrieval:v3:{digest}"
 
     async def ping(self) -> None:
         if not await self.client.ping():
             raise RuntimeError("Redis ping failed")
 
     async def get(self, message: str, public_context_id: str | int | None = None) -> tuple[list[SourceData], list[ToolCallData]] | None:
-        raw = await self.client.get(self.key_for(message, public_context_id))
+        raw = await self.client.get(
+            self.key_for(message, public_context_id, self.dataset_version)
+        )
         if raw is None:
             return None
         payload = json.loads(raw)
@@ -69,7 +81,7 @@ class RetrievalCache:
             ],
         }
         await self.client.setex(
-            self.key_for(message, public_context_id),
+            self.key_for(message, public_context_id, self.dataset_version),
             self.ttl_seconds,
             json.dumps(
                 payload, ensure_ascii=False, separators=(",", ":"), default=str
@@ -81,7 +93,7 @@ class RetrievalCache:
         keys = [
             key
             async for key in self.client.scan_iter(
-                match="smart-gov:retrieval:v2:*", count=200
+                match="smart-gov:retrieval:v3:*", count=200
             )
         ]
         if keys:

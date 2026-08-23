@@ -22,6 +22,7 @@ from app.application.ports import (
     ChatModelPort,
     ChatPersistencePort,
     GovernmentToolRetrievalPort,
+    KnowledgeRetrievalPort,
     KnowledgeVectorPort,
     PublicRetrievalCachePort,
 )
@@ -50,10 +51,24 @@ class BusinessRuntime:
         government_tools: GovernmentToolRetrievalPort,
         milvus: KnowledgeVectorPort,
         model: ChatModelPort,
+        knowledge_retrieval: KnowledgeRetrievalPort | None = None,
     ) -> None:
-        if settings.environment != "local" and settings.enable_demo_providers:
-            raise RuntimeError("Demo providers may only be enabled in ENVIRONMENT=local")
-        enabled = settings.environment == "local" and settings.enable_demo_providers
+        environment = settings.environment.strip().lower()
+        if environment == "demo" and settings.enable_demo_providers:
+            acknowledgement = (
+                settings.demo_provider_ack.get_secret_value()
+                if settings.demo_provider_ack is not None
+                else ""
+            )
+            if acknowledgement != "I_ACKNOWLEDGE_DEMO_PROVIDERS":
+                raise RuntimeError(
+                    "ENVIRONMENT=demo requires explicit DEMO_PROVIDER_ACK"
+                )
+        elif environment != "local" and settings.enable_demo_providers:
+            raise RuntimeError(
+                "Demo providers may only be enabled in ENVIRONMENT=local or acknowledged demo"
+            )
+        enabled = environment in {"local", "demo"} and settings.enable_demo_providers
         self.settings = settings
         self._startup_lock = asyncio.Lock()
         self._startup_complete = False
@@ -90,7 +105,7 @@ class BusinessRuntime:
             persistence,
             cache,
             government_tools,
-            milvus,
+            knowledge_retrieval or milvus,
             model,
             self.security,
         )

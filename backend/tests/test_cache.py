@@ -68,4 +68,7 @@ async def test_public_cache_never_serializes_tool_arguments_or_pii() -> None:
 def test_cache_key_normalizes_equivalent_text() -> None:
     assert RetrievalCache.key_for(" 社保卡  办理 ") == RetrievalCache.key_for("社保卡 办理")
     assert RetrievalCache.key_for("社保卡办理", 1001) != RetrievalCache.key_for("社保卡办理", 1002)
-    assert RetrievalCache.key_for("社保卡办理").startswith("smart-gov:retrieval:v2:")
+    assert RetrievalCache.key_for("社保卡办理").startswith("smart-gov:retrieval:v3:")
+    assert RetrievalCache.key_for(
+        "社保卡办理", dataset_version="2026.08"
+    ) != RetrievalCache.key_for("社保卡办理", dataset_version="2026.09")

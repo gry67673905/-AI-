@@ -5,6 +5,13 @@ from typing import Any, Awaitable, Callable, Protocol
 from uuid import UUID
 
 from app.application.dtos import Principal, SourceData, ToolCallData
+from app.application.rag_dtos import (
+    CorpusArchiveData,
+    CorpusChunkData,
+    CorpusDatasetSpec,
+    CorpusDatasetState,
+    CorpusRouteData,
+)
 
 from app.domain.enums import (
     ApplicantType,
@@ -244,3 +251,83 @@ class SecurityPort(Protocol):
 
 class KnowledgeParserPort(Protocol):
     def extract(self, extension: str, content: bytes) -> str: ...
+
+
+class EmbeddingPort(Protocol):
+    model_name: str
+    dimension: int
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class CorpusArchiveReaderPort(Protocol):
+    def read(
+        self,
+        archive_path: str,
+        *,
+        expected_sha256: str | None = None,
+        expected_chunk_count: int = 15_858,
+    ) -> CorpusArchiveData: ...
+
+
+class CorpusRepositoryPort(Protocol):
+    async def ensure_dataset(
+        self, spec: CorpusDatasetSpec, archive: CorpusArchiveData
+    ) -> CorpusDatasetState: ...
+
+    async def pending_chunks(
+        self, dataset_id: UUID, limit: int
+    ) -> list[CorpusChunkData]: ...
+
+    async def cached_embeddings(
+        self, content_hashes: list[str], model: str, dimension: int
+    ) -> dict[str, list[float]]: ...
+
+    async def store_embeddings(
+        self,
+        embeddings: dict[str, list[float]],
+        model: str,
+        dimension: int,
+    ) -> None: ...
+
+    async def mark_chunks_indexed(
+        self, dataset_id: UUID, external_ids: list[str]
+    ) -> None: ...
+
+    async def mark_dataset_active(
+        self, dataset_id: UUID, indexed_chunk_count: int
+    ) -> None: ...
+
+    async def mark_dataset_failed(
+        self, dataset_id: UUID, error_code: str
+    ) -> None: ...
+
+
+class VersionedCorpusIndexPort(Protocol):
+    async def ensure_collections(self, spec: CorpusDatasetSpec) -> None: ...
+
+    async def upsert_chunks(
+        self,
+        spec: CorpusDatasetSpec,
+        chunks: list[CorpusChunkData],
+        vectors: list[list[float]],
+    ) -> None: ...
+
+    async def upsert_routes(
+        self,
+        spec: CorpusDatasetSpec,
+        routes: list[CorpusRouteData],
+        vectors: list[list[float]],
+    ) -> None: ...
+
+    async def count_chunks(self, spec: CorpusDatasetSpec) -> int: ...
+
+    async def count_routes(self, spec: CorpusDatasetSpec) -> int: ...
+
+    async def activate_aliases(self, spec: CorpusDatasetSpec) -> None: ...
+
+
+class CorpusSearchPort(Protocol):
+    dataset_version: str
+
+    async def search(self, query: str, limit: int = 6) -> list[SourceData]: ...

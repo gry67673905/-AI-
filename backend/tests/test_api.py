@@ -12,10 +12,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.policies import DomainRuleViolation
 from app.infrastructure.providers import DemoProviderDisabled
 
-from app.errors import DatabaseUnavailable, LLMUnavailable
+from app.errors import DatabaseUnavailable, LLMUnavailable, TooManyRequests
 from app.chat import ChatExecutionContext, handle_chat
 from app.application.coordinators import ConsultationCoordinator
-from app.application.dtos import Principal, SourceData as Source, ToolCallData as ToolCall
+from app.application.dtos import (
+    KnowledgeSearchResult,
+    Principal,
+    SourceData as Source,
+    ToolCallData as ToolCall,
+)
 from app.domain.enums import ApplicantType, Role
 from app.main import create_app
 from app.schemas import ChatRequest, HealthCheck
@@ -204,6 +209,38 @@ def test_chat_runs_full_path_then_uses_cache() -> None:
     assert len(services.database.answers) == 2
 
 
+def test_group_rag_notice_is_added_on_fresh_and_cached_results() -> None:
+    class GroupKnowledge:
+        async def search_with_warnings(self, _query: str) -> KnowledgeSearchResult:
+            return KnowledgeSearchResult(
+                sources=[
+                    Source(
+                        kind="rag",
+                        title="组员语料",
+                        reference="ragdb://v1/t01/t01-000-00",
+                        excerpt="组员演示资料",
+                    )
+                ]
+            )
+
+    services = FakeServices()
+    services.chat.knowledge = GroupKnowledge()  # type: ignore[assignment]
+    with TestClient(create_app(services)) as client:
+        first = client.post("/api/v1/chat", json={"message": "社保卡怎么办"})
+        second = client.post("/api/v1/chat", json={"message": "社保卡怎么办"})
+
+    assert first.status_code == 200
+    assert services.cache.set_calls == 1
+    assert any(
+        warning.startswith("rag_group_demo_unverified:")
+        for warning in first.json()["warnings"]
+    )
+    assert any(
+        warning.startswith("rag_group_demo_unverified:")
+        for warning in second.json()["warnings"]
+    )
+
+
 def test_chat_stream_maps_application_dataclasses_to_sse() -> None:
     services = FakeServices()
     with TestClient(create_app(services)) as client:
@@ -214,6 +251,27 @@ def test_chat_stream_maps_application_dataclasses_to_sse() -> None:
     assert '"kind": "mcp"' in response.text
     assert "event: delta" in response.text
     assert "event: done" in response.text
+
+
+def test_chat_quota_failure_is_structured_429_for_json_and_stream() -> None:
+    class RejectingQuota:
+        async def consume(self, _account_id: object, _client_ip: str) -> None:
+            raise TooManyRequests()
+
+    services = FakeServices()
+    services.chat_quota = RejectingQuota()  # type: ignore[attr-defined]
+    with TestClient(create_app(services)) as client:
+        json_response = client.post(
+            "/api/v1/chat", json={"message": "社保卡怎么办"}
+        )
+        stream_response = client.post(
+            "/api/v1/chat/stream", json={"message": "社保卡怎么办"}
+        )
+
+    assert json_response.status_code == 429
+    assert json_response.json()["error"]["code"] == "chat_quota_exceeded"
+    assert stream_response.status_code == 429
+    assert stream_response.json()["error"]["code"] == "chat_quota_exceeded"
 
 
 def test_retrieval_dependencies_degrade_with_warnings() -> None:

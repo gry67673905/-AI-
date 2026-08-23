@@ -35,6 +35,8 @@ GET /health/ready
 }
 ```
 
+上例是默认本地模式的 7 项检查。固定团队 RAG 启用后，`checks` 还必须包含第 8 项 `rag_corpus`；该探针不调用付费 embedding，而是验证 dataset `team-2026-08-22-v1` 的内容/路由 alias 及 15,858/1,012 精确行数。团队语料导入是服务器运维命令，不新增 HTTP API，因此下方 OpenAPI 总数仍为 73。
+
 ### 搜索事项
 
 ```http
@@ -553,7 +555,7 @@ Idempotency-Key: <uuid>
 
 ## 完整 OpenAPI 操作清单
 
-以下 73 个 method/path 与当前本地 `/openapi.json` 一致；请求体、认证和状态规则以上文及实时 OpenAPI 为准。
+以下 73 个 method/path 与当前最终 `/openapi.json` 一致；版本化团队 RAG 通过运维命令导入，不暴露额外业务路由。请求体、认证和状态规则以上文及实时 OpenAPI 为准。
 
 ```text
 GET /health/live

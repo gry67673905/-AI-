@@ -1,0 +1,20 @@
+[Unit]
+Description=Smart Gov TLS-ALPN certificate renewal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/smart-gov-renew-tls
+UMask=0077
+TimeoutStartSec=10min
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/lego-smart-gov /etc/letsencrypt/live /var/backups/smart-gov-cert
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

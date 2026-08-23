@@ -29,8 +29,8 @@ flowchart LR
     end
 
     PG[(PostgreSQL 16)]
-    Redis[(Redis 7\n公开检索缓存 v2)]
-    Milvus[(Milvus 2.6\n知识向量 v2)]
+    Redis[(Redis 7\n公开检索缓存 v3)]
+    Milvus[(Milvus 2.6\n本地知识 + 版本化团队 RAG)]
     MinIO[(MinIO\n私有材料/知识文件)]
     MCP[Node MCP Server\n/mcp + /health]
     Mock[模拟政务 REST API\n六个公开事项]
@@ -81,8 +81,8 @@ flowchart LR
 1. WebView 将枚举化命令交给 `PortalJsBoundary`，原生 `StreamingGateway` 或普通网关请求 FastAPI。
 2. `ConsultationCoordinator` 从 PostgreSQL 的已发布目录建立执行上下文；歧义（例如“社保”）直接返回多个候选，不调用检索或模型。
 3. 对已选择事项，协调者用事项 UUID、编码、标题和简介等白名单公开字段生成 `local_catalog` 来源；字段经过公开文本脱敏，不从模型或 Mock API 反推。
-4. Redis 只缓存“规范化公开问题 + 外部事项映射 ID”对应的 MCP/RAG 检索上下文。`local_catalog` 每次从 PostgreSQL 当前版本重建，因此不会被旧缓存覆盖。
-5. 缓存未命中时，MCP 与 Milvus 并行检索：MCP 通过五个只读工具访问 Mock API，Milvus 只返回 ACTIVE 知识片段。
+4. Redis 只缓存 MCP/RAG 检索上下文。v3 键为 `SHA-256(规范化公开问题|service:外部事项映射 ID|dataset:数据集版本)`；dataset 版本参与隔离，本地团队 RAG 未启用时为 `none`，云端固定为 `team-2026-08-22-v1`。`local_catalog` 每次从 PostgreSQL 当前版本重建，因此不会被旧缓存覆盖。
+5. 缓存未命中时，MCP 与组合知识检索器并行工作：MCP 通过五个只读工具访问 Mock API；组合检索器并行查询 256 维本地知识和可选的 1,024 维团队语料，再以 RRF 融合排名。任一知识后端故障时保留另一侧结果并返回降级 warning。
 6. 有至少一个有效可核验来源时，LangChain 才把公开问题与来源交给 DeepSeek；`local_catalog`、`mcp`、`rag` 三类来源保持独立标识，回答和工具审计持久化到 PostgreSQL。
 7. `/chat/stream` 固定输出 `meta`、`delta`、`done` 或 `error` SSE 事件；Android 最终使用 `TextToSpeech` 播报，原始音频不上传。
 
@@ -120,6 +120,8 @@ sequenceDiagram
 
 索引/发布失败会持久化 `INDEX_FAILED`；首次失败的结构化 409 在 `detail.job_id` 返回任务标识，管理员用该 ID 和幂等键重试。进程启动会把遗留的 `INDEXING` 任务恢复成可重试的 `INDEX_FAILED`，并以 PostgreSQL 的 ACTIVE 知识块重新激活 Milvus，保证持久卷升级后仍可检索。管理员可归档 `ACTIVE/SUPERSEDED` 任务：元数据和审计保留，若无同文档的其他 ACTIVE 任务，则知识块转为 `ARCHIVED` 并从向量检索移除。重试/归档成功会使公开 Redis 缓存失效。当前没有独立知识任务列表 API，调用方需保存上传响应或失败详情中的 `job_id`。
 
+团队 RAG 不经管理员 HTTP 接口导入，而是由服务器运维协调者读取净化后的 data-only ZIP。`0005_rag_corpus` 持久化数据集清单、15,858 个内容分块的可恢复检查点以及按内容哈希/模型/维度去重的 embedding 缓存；导入器以固定批次调用 DashScope `text-embedding-v4`（1,024 维），写入版本化内容/路由 collection，最后才原子切换两个 alias。固定数据集另有 1,012 条文档路由向量，用于先选最多三个主题再检索正文。原始归档中的代码、密钥和原生向量不会进入净化产物。
+
 ## Android 架构与原生边界
 
 Android 使用单 Activity 安全 WebView 宿主：
@@ -135,7 +137,7 @@ JS 不能指定任意 URL、HTTP 方法、原生类名、坐标或外部链接�
 
 | 数据 | 存储/处理 | 禁止事项 |
 | --- | --- | --- |
-| 公开事项/知识 | PostgreSQL、Milvus、Redis v2、MCP/Mock | 不宣称真实政策 |
+| 公开事项/知识 | PostgreSQL、Milvus、Redis v3、MCP/Mock | 不宣称真实政策；团队语料标记为未核验演示参考 |
 | 账号/JWT refresh hash | PostgreSQL；Android Token 在 Keystore 加密存储 | 不进入 WebView/日志/明文偏好 |
 | 私人表单/办件 | PostgreSQL 授权查询 | 不进入公共缓存或 LLM 上下文 |
 | 材料 | MinIO 私有 bucket + PostgreSQL 哈希元数据 | 不生成公共直链、不在 WebView 直接打开 |
@@ -149,16 +151,18 @@ JWT access token 默认 15 分钟，refresh token 默认 7 天且只保存哈希
 - PostgreSQL 不可用：核心请求返回结构化 503，不创建无法持久化的结果。
 - DeepSeek 不可用：返回结构化 502，不用模板冒充模型答案。
 - Redis 不可用：公开咨询绕过缓存；私人数据本来就不使用公共缓存。
-- MCP 或 Milvus 单项不可用：使用剩余公开来源回答，并在 `warnings` 明示降级。
+- MCP 或 Milvus 单项不可用：使用剩余公开来源回答，并在 `warnings` 明示降级；本地/团队知识后端也可彼此降级。
 - MinIO 不可用：材料/知识文件操作失败；API 就绪检查必须反映全栈依赖状态。
-- `/health/live` 只检查 API 进程；`/health/ready` 聚合 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项，任一失败返回 503。
+- `/health/live` 只检查 API 进程。团队 RAG 关闭时，`/health/ready` 聚合 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项；启用时增加 `rag_corpus` 为 8 项，并核对版本化内容/路由 alias 及 15,858 + 1,012 的精确行数。任一启用中的依赖失败均返回 503。
 
 ## 数据迁移与回退边界
 
-迁移链为 `0001_initial → 0002_identity_catalog → 0003_applications_operations → 0004_knowledge_audit`。旧匿名聊天保留，新 `owner_account_id` 可为空且不会自动归属后来注册的用户。Milvus 使用新集合 `gov_knowledge_v2`，Redis 使用 `smart-gov:retrieval:v2:*`；旧数据不由迁移脚本删除。
+迁移链为 `0001_initial → 0002_identity_catalog → 0003_applications_operations → 0004_knowledge_audit → 0005_rag_corpus`。旧匿名聊天保留，新 `owner_account_id` 可为空且不会自动归属后来注册的用户。`0005` 只新增 `knowledge_datasets`、`knowledge_corpus_chunks` 和 `knowledge_embedding_cache`，不覆盖管理员知识表。Milvus 保留 `gov_knowledge_v2`，团队语料使用带版本/归档哈希的 collection 和活动 alias；Redis 使用 `smart-gov:retrieval:v3:*`，dataset 版本使新旧检索结果天然隔离。
 
 `scripts/migrate.ps1` 仅执行 `upgrade head` 和状态检查；普通 `dev-down.ps1` 保留命名卷。需要回退应用时应先做数据库/对象存储备份并制定兼容策略，不能用自动 downgrade 代替数据恢复。
 
-## 云端迁移
+## 云端演示拓扑
 
-保持 Android API 契约、FastAPI/MCP 边界和 Provider 端口不变，可将 PostgreSQL、Redis、Milvus 与对象存储替换为托管服务。公网入口前必须增加 HTTPS/WAF，将 `.env` 替换为 Secret Manager，并替换本地 JWT、Mock API 与所有 Demo Provider。接入真实政务平台前还需完成正式身份、租户隔离、数据分级、病毒扫描、授权审计、隐私与合规评估。
+`compose.cloud.yaml` 将 API 只绑定到服务器回环地址 `127.0.0.1:18000`；Nginx 使用官方 lego v5.4.0 通过 HTTP-01 管理 Let’s Encrypt `shortlived` IP 证书，对外提供 TLS 1.2/1.3、HTTP→HTTPS 重定向、SSE 关闭缓冲、请求体限制和接口限流。TCP 80 持续开放用于短证书无停机续期。Docker secrets 只读注入数据库、JWT、内部 Token、DeepSeek 与 DashScope 凭据。首次发布、团队 RAG 付费导入、一次付费聊天验收和 Nginx 流量切换分别需要显式确认，失败时不会自动停掉旧服务。
+
+云端 Android APK 只能编译进无凭据、无路径的 HTTPS origin，且 debug/release 均拒绝明文流量。具体部署、回滚与 APK 构建步骤见 [云端部署手册](cloud-deployment.md)。该拓扑仍保留 Mock API 与 Demo Provider，不等同于正式政务上线；正式环境还需替换身份、租户、密钥、文件扫描及外部适配器并完成合规评估。

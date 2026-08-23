@@ -1,0 +1,22 @@
+# Bootstrap vhost used only to complete the ACME HTTP-01 challenge. It keeps
+# the legacy API on 127.0.0.1:8000 until an explicit cutover is approved.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

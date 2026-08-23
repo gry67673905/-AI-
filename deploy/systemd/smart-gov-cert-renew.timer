@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Smart Gov certificate renewal check
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=4h
+Persistent=true
+Unit=smart-gov-cert-renew.service
+
+[Install]
+WantedBy=timers.target

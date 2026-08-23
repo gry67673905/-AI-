@@ -1,0 +1,440 @@
+name: smart-gov-cloud-demo
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - app_net
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
+      POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: "1.0"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    <<: *service-defaults
+    image: redis:7.4.1-alpine
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "redis"]
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$(cat /run/secrets/redis_password)\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 384m
+    mem_reservation: 96m
+    cpus: "0.5"
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+
+  etcd:
+    <<: *service-defaults
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >-
+      etcd --advertise-client-urls=http://etcd:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: "0.5"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+
+  minio:
+    <<: *service-defaults
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "minio"]
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    volumes:
+      - minio_data:/minio_data
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 768m
+    mem_reservation: 192m
+    cpus: "0.75"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+
+  milvus:
+    <<: *service-defaults
+    image: milvusdb/milvus:v2.6.22
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "milvus"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_REGION: us-east-1
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    volumes:
+      - milvus_data:/var/lib/milvus
+      - ./infra/milvus-user.yaml:/milvus/configs/user.yaml:ro
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      start_period: 90s
+      timeout: 10s
+      retries: 30
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    mem_limit: 2560m
+    mem_reservation: 1024m
+    cpus: "2.0"
+    pids_limit: 1024
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:unconfined
+
+  mock-gov-api:
+    <<: *service-defaults
+    image: smart-gov/mock-gov-api:${RELEASE_TAG:-dev}
+    build:
+      context: ./mock-gov-api
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "mock"]
+    user: "0:0"
+    environment:
+      PORT: "8080"
+    secrets:
+      - gov_api_token
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpus: "0.25"
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+
+  mcp-server:
+    <<: *service-defaults
+    image: smart-gov/mcp-server:${RELEASE_TAG:-dev}
+    build:
+      context: ./mcp-server
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "mcp"]
+    user: "0:0"
+    environment:
+      PORT: "3000"
+      MCP_SESSION_TTL_MS: ${MCP_SESSION_TTL_MS:-900000}
+      MCP_MAX_SESSIONS: ${MCP_MAX_SESSIONS:-128}
+      GOV_API_BASE_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
+    secrets:
+      - mcp_internal_token
+      - gov_api_token
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      mock-gov-api:
+        condition: service_healthy
+    mem_limit: 384m
+    mem_reservation: 96m
+    cpus: "0.5"
+    pids_limit: 192
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    <<: *service-defaults
+    image: smart-gov/api:${RELEASE_TAG:-dev}
+    build:
+      context: ./backend
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "api"]
+    user: "0:0"
+    environment:
+      ENVIRONMENT: demo
+      POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
+      POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
+      REDIS_HOST: redis
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
+      MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-gov_knowledge_v2}
+      RAG_GROUP_ENABLED: ${RAG_GROUP_ENABLED:-false}
+      RAG_DATASET_VERSION: ${RAG_DATASET_VERSION:-team-2026-08-22-v1}
+      RAG_ARCHIVE_SHA256: ${RAG_ARCHIVE_SHA256:-b5221f51465a230192148cb8e3db81a81e21348809a2738ca8ce89d8f6543f93}
+      RAG_EXPECTED_CHUNK_COUNT: ${RAG_EXPECTED_CHUNK_COUNT:-15858}
+      RAG_EXPECTED_ROUTE_COUNT: ${RAG_EXPECTED_ROUTE_COUNT:-1012}
+      RAG_GROUP_COLLECTION_PREFIX: ${RAG_GROUP_COLLECTION_PREFIX:-gov_group_rag}
+      RAG_GROUP_COLLECTION_ALIAS: ${RAG_GROUP_COLLECTION_ALIAS:-gov_group_rag_active}
+      RAG_GROUP_ROUTE_ALIAS: ${RAG_GROUP_ROUTE_ALIAS:-gov_group_rag_route_active}
+      DASHSCOPE_API_KEY_FILE: /run/secrets/dashscope_api_key
+      DASHSCOPE_EMBEDDING_BASE_URL: ${DASHSCOPE_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v4}
+      DASHSCOPE_EMBEDDING_DIMENSION: ${DASHSCOPE_EMBEDDING_DIMENSION:-1024}
+      DASHSCOPE_EMBEDDING_TIMEOUT_SECONDS: ${DASHSCOPE_EMBEDDING_TIMEOUT_SECONDS:-30}
+      DASHSCOPE_EMBEDDING_MAX_RETRIES: ${DASHSCOPE_EMBEDDING_MAX_RETRIES:-2}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MAX_MATERIAL_BYTES: ${MAX_MATERIAL_BYTES:-10485760}
+      MCP_URL: ${MCP_URL:-http://mcp-server:3000/mcp}
+      MCP_HEALTH_URL: ${MCP_HEALTH_URL:-http://mcp-server:3000/health}
+      MOCK_GOV_API_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
+      JWT_ACCESS_MINUTES: ${JWT_ACCESS_MINUTES:-15}
+      JWT_REFRESH_DAYS: ${JWT_REFRESH_DAYS:-7}
+      ENABLE_DEMO_PROVIDERS: ${ENABLE_DEMO_PROVIDERS:-true}
+      CHAT_QUOTA_ENABLED: ${CHAT_QUOTA_ENABLED:-true}
+      CHAT_QUOTA_ANONYMOUS_DAILY: ${CHAT_QUOTA_ANONYMOUS_DAILY:-10}
+      CHAT_QUOTA_AUTHENTICATED_DAILY: ${CHAT_QUOTA_AUTHENTICATED_DAILY:-30}
+      CHAT_QUOTA_GLOBAL_DAILY: ${CHAT_QUOTA_GLOBAL_DAILY:-200}
+      DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-admin.demo}
+      DEMO_STAFF_USERNAME: ${DEMO_STAFF_USERNAME:-staff.demo}
+      LLM_MODE: ${LLM_MODE:-deepseek}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    secrets:
+      - postgres_password
+      - redis_password
+      - minio_root_user
+      - minio_root_password
+      - jwt_signing_key
+      - pii_hmac_key
+      - pii_encryption_key
+      - mcp_internal_token
+      - demo_sms_code
+      - demo_provider_ack
+      - demo_admin_password
+      - demo_staff_password
+      - deepseek_api_key
+      - dashscope_api_key
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    ports:
+      - "127.0.0.1:18000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 10s
+      start_period: 45s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    mem_limit: 1024m
+    mem_reservation: 256m
+    cpus: "1.5"
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+
+  rag-import:
+    image: smart-gov/api:${RELEASE_TAG:-dev}
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "rag-import"]
+    user: "0:0"
+    command:
+      - python
+      - -m
+      - app.ops.import_rag_corpus
+      - --zip
+      - /import/group-rag-sanitized-v1.zip
+      - --dataset-version
+      - ${RAG_DATASET_VERSION:-team-2026-08-22-v1}
+      - --expected-sha256
+      - ${RAG_ARCHIVE_SHA256:-b5221f51465a230192148cb8e3db81a81e21348809a2738ca8ce89d8f6543f93}
+      - --expected-chunks
+      - ${RAG_EXPECTED_CHUNK_COUNT:-15858}
+      - --source-owner
+      - project-team
+      - --license-status
+      - INTERNAL_APPROVED
+      - --allow-unverified-demo
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
+      POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
+      REDIS_HOST: redis
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
+      MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
+      DASHSCOPE_API_KEY_FILE: /run/secrets/dashscope_api_key
+      DASHSCOPE_EMBEDDING_BASE_URL: ${DASHSCOPE_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v4}
+      DASHSCOPE_EMBEDDING_DIMENSION: ${DASHSCOPE_EMBEDDING_DIMENSION:-1024}
+      DASHSCOPE_EMBEDDING_TIMEOUT_SECONDS: ${DASHSCOPE_EMBEDDING_TIMEOUT_SECONDS:-30}
+      DASHSCOPE_EMBEDDING_MAX_RETRIES: ${DASHSCOPE_EMBEDDING_MAX_RETRIES:-2}
+      RAG_IMPORT_BATCH_SIZE: ${RAG_IMPORT_BATCH_SIZE:-500}
+      RAG_IMPORT_BATCH_RETRIES: ${RAG_IMPORT_BATCH_RETRIES:-2}
+      RAG_GROUP_COLLECTION_PREFIX: ${RAG_GROUP_COLLECTION_PREFIX:-gov_group_rag}
+      RAG_GROUP_COLLECTION_ALIAS: ${RAG_GROUP_COLLECTION_ALIAS:-gov_group_rag_active}
+      RAG_GROUP_ROUTE_ALIAS: ${RAG_GROUP_ROUTE_ALIAS:-gov_group_rag_route_active}
+    secrets:
+      - postgres_password
+      - redis_password
+      - dashscope_api_key
+    volumes:
+      - type: bind
+        source: ${RAG_IMPORT_ARCHIVE:-./artifacts/rag/group-rag-sanitized-v1.zip}
+        target: /import/group-rag-sanitized-v1.zip
+        read_only: true
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    networks:
+      - app_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    mem_limit: 1024m
+    cpus: "1.0"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+
+  minio-backup:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "minio-backup"]
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    environment:
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+      - ${BACKUP_DIR:-./deploy/backups/UNSET}/minio:/backup
+    networks:
+      - app_net
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    mem_limit: 256m
+    cpus: "0.25"
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  postgres_password:
+    file: ./deploy/secrets/postgres_password
+  redis_password:
+    file: ./deploy/secrets/redis_password
+  minio_root_user:
+    file: ./deploy/secrets/minio_root_user
+  minio_root_password:
+    file: ./deploy/secrets/minio_root_password
+  jwt_signing_key:
+    file: ./deploy/secrets/jwt_signing_key
+  pii_hmac_key:
+    file: ./deploy/secrets/pii_hmac_key
+  pii_encryption_key:
+    file: ./deploy/secrets/pii_encryption_key
+  mcp_internal_token:
+    file: ./deploy/secrets/mcp_internal_token
+  gov_api_token:
+    file: ./deploy/secrets/gov_api_token
+  demo_sms_code:
+    file: ./deploy/secrets/demo_sms_code
+  demo_provider_ack:
+    file: ./deploy/secrets/demo_provider_ack
+  demo_admin_password:
+    file: ./deploy/secrets/demo_admin_password
+  demo_staff_password:
+    file: ./deploy/secrets/demo_staff_password
+  deepseek_api_key:
+    file: ./deploy/secrets/deepseek_api_key
+  dashscope_api_key:
+    file: ./deploy/secrets/dashscope_api_key
+
+networks:
+  app_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  etcd_data:
+  minio_data:
+  milvus_data:

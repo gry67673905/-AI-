@@ -1,7 +1,9 @@
 .env
 .git
+.venv
+.coverage
+htmlcov
 .pytest_cache
 __pycache__
 *.py[cod]
 tests
-

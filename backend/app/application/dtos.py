@@ -38,6 +38,14 @@ class SourceData:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeSearchResult:
+    """Grounding sources plus non-fatal retrieval degradation warnings."""
+
+    sources: list[SourceData] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCallData:
     name: str
     success: bool

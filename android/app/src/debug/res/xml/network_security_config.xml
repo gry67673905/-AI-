@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Debug builds may point GOV_API_BASE at an emulator host or LAN development PC. -->
+<!-- Cloud-demo debug builds intentionally reject cleartext transport. -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>

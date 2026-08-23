@@ -308,6 +308,34 @@ class KnowledgeIndexJob:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeDataset:
+    id: UUID
+    name: str
+    version: str
+    archive_sha256: str
+    manifest_hash: str
+    status: KnowledgeStatus
+    expected_chunk_count: int
+    indexed_chunk_count: int
+    embedding_model: str
+    embedding_dimension: int
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCorpusChunk:
+    id: UUID
+    dataset_id: UUID
+    external_id: str
+    topic_slug: str
+    document_title: str
+    section: str
+    chunk_type: str
+    content: str
+    content_hash: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class BusinessAuditEvent:
     id: UUID
     actor_id: UUID | None

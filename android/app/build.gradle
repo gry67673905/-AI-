@@ -16,12 +16,23 @@ if (agcConfigFile.exists()) {
 
 def sharedDebugKeystore = file("D:/AndroidDev/keystores/ai-companion-debug.keystore")
 def govApiBaseOverride = providers.gradleProperty("govApiBase").orNull
-def debugGovApiBase = (govApiBaseOverride ?: "http://10.0.2.2:8000").replaceAll('/+$', '')
-def releaseGovApiBase = (govApiBaseOverride ?: "https://api.invalid").replaceAll('/+$', '')
-def escapedDebugGovApiBase = debugGovApiBase
-    .replace("\\", "\\\\")
-    .replace("\"", "\\\"")
-def escapedReleaseGovApiBase = releaseGovApiBase
+def defaultGovApiBase = "https://123.249.68.176"
+def configuredGovApiBase = (govApiBaseOverride ?: defaultGovApiBase).trim().replaceAll('/+$', '')
+def configuredGovApiUri
+try {
+    configuredGovApiUri = new URI(configuredGovApiBase)
+} catch (Exception invalidUri) {
+    throw new GradleException("govApiBase must be a valid HTTPS origin", invalidUri)
+}
+if (configuredGovApiUri.scheme != "https"
+    || !configuredGovApiUri.host
+    || configuredGovApiUri.userInfo
+    || configuredGovApiUri.query
+    || configuredGovApiUri.fragment
+    || !(configuredGovApiUri.path == null || configuredGovApiUri.path.isEmpty())) {
+    throw new GradleException("govApiBase must be an HTTPS origin without credentials, path, query, or fragment")
+}
+def escapedGovApiBase = configuredGovApiBase
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
 
@@ -44,21 +55,21 @@ android {
         applicationId "com.example.aicompanion"
         minSdk 24
         targetSdk 35
-        versionCode 1
-        versionName "0.1.0"
+        versionCode 2
+        versionName "0.2.0-cloud-demo"
 
         buildConfigField "String", "HMS_MAP_API_KEY", "\"${hmsMapApiKey}\""
     }
 
     buildTypes {
         debug {
-            buildConfigField "String", "GOV_API_BASE", "\"${escapedDebugGovApiBase}\""
+            buildConfigField "String", "GOV_API_BASE", "\"${escapedGovApiBase}\""
             if (sharedDebugKeystore.exists()) {
                 signingConfig signingConfigs.sharedDebug
             }
         }
         release {
-            buildConfigField "String", "GOV_API_BASE", "\"${escapedReleaseGovApiBase}\""
+            buildConfigField "String", "GOV_API_BASE", "\"${escapedGovApiBase}\""
         }
     }
 
@@ -99,5 +110,5 @@ dependencies {
 tasks.withType(Test).configureEach {
     useJUnit()
     systemProperty "liveBackendTest", System.getProperty("liveBackendTest", "false")
-    systemProperty "liveBackendUrl", System.getProperty("liveBackendUrl", "http://127.0.0.1:8000")
+    systemProperty "liveBackendUrl", System.getProperty("liveBackendUrl", defaultGovApiBase)
 }

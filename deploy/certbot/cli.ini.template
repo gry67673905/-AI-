@@ -1,0 +1,7 @@
+# Domain and optional registration email remain explicit on the certbot
+# command line so this file cannot accidentally request another name.
+agree-tos = true
+non-interactive = true
+authenticator = webroot
+webroot-path = /var/www/certbot
+keep-until-expiring = true

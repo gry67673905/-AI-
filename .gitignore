@@ -30,6 +30,10 @@ volumes/
 artifacts/
 logs/
 .runtime-backups/
+deploy/secrets/
+deploy/backups/
+deploy/releases/
+deploy/state/
 
 # IDE / OS
 .idea/

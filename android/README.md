@@ -13,7 +13,7 @@
 Debug 默认后端为 `http://10.0.2.2:8000`。可以在构建时覆盖，例如：
 
 ```powershell
-.\gradlew.bat assembleDebug -PgovApiBase=https://api.example.gov
+.\gradlew.bat assembleDebug -PgovApiBase=https://123.249.68.176
 ```
 
 仅在本地全栈已启动且明确希望执行真实请求时运行可选测试：

@@ -15,6 +15,14 @@ from app.llm import LLMService
 from app.mcp_client import MCPGovClient
 from app.milvus import MilvusRAG
 from app.schemas import HealthCheck
+from app.quota import ChatQuota
+from app.infrastructure.composite_retriever import CompositeKnowledgeRetriever
+from app.infrastructure.dashscope_embedding import DashScopeEmbeddingAdapter
+from app.infrastructure.rag_corpus_milvus import (
+    GroupCorpusRetriever,
+    VersionedMilvusCorpusIndex,
+)
+from app.application.rag_import import versioned_collection_names
 from app.infrastructure.runtime import BusinessRuntime
 
 
@@ -25,11 +33,43 @@ class AppServices:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.database = Database(settings.database_url)
-        self.cache = RetrievalCache(settings.redis_url, settings.cache_ttl_seconds)
+        self.cache = RetrievalCache(
+            settings.redis_url,
+            settings.cache_ttl_seconds,
+            dataset_version=settings.rag_dataset_version,
+        )
         self.milvus = MilvusRAG(
             settings.milvus_uri,
             settings.milvus_collection,
             settings.milvus_timeout_seconds,
+        )
+        self.group_embedding: DashScopeEmbeddingAdapter | None = None
+        self.group_index: VersionedMilvusCorpusIndex | None = None
+        self.group_retriever: GroupCorpusRetriever | None = None
+        if settings.rag_group_enabled:
+            self.group_embedding = DashScopeEmbeddingAdapter(
+                api_key=settings.dashscope_api_key,
+                api_key_file=settings.dashscope_api_key_file,
+                model_name=settings.dashscope_embedding_model,
+                dimension=settings.dashscope_embedding_dimension,
+                base_url=settings.dashscope_embedding_base_url,
+                timeout_seconds=settings.dashscope_embedding_timeout_seconds,
+                max_retries=settings.dashscope_embedding_max_retries,
+            )
+            self.group_index = VersionedMilvusCorpusIndex(
+                settings.milvus_uri,
+                settings.milvus_timeout_seconds,
+                settings.dashscope_embedding_dimension,
+            )
+            self.group_retriever = GroupCorpusRetriever(
+                self.group_index,
+                self.group_embedding,
+                dataset_version=settings.rag_dataset_version,
+                collection_alias=settings.rag_group_collection_alias,
+                route_alias=settings.rag_group_route_alias,
+            )
+        self.knowledge_retriever = CompositeKnowledgeRetriever(
+            self.milvus, self.group_retriever
         )
         self.mcp = MCPGovClient(
             settings.mcp_url,
@@ -46,6 +86,14 @@ class AppServices:
             settings.llm_timeout_seconds,
             settings.llm_max_retries,
         )
+        self.chat_quota = ChatQuota(
+            settings.redis_url,
+            settings.pii_hmac_key.get_secret_value(),
+            enabled=settings.chat_quota_enabled,
+            anonymous_daily=settings.chat_quota_anonymous_daily,
+            authenticated_daily=settings.chat_quota_authenticated_daily,
+            global_daily=settings.chat_quota_global_daily,
+        )
         self.business = BusinessRuntime(
             settings,
             self.database.sessions,
@@ -54,6 +102,7 @@ class AppServices:
             self.mcp,
             self.milvus,
             self.llm,
+            knowledge_retrieval=self.knowledge_retriever,
         )
         self._http = httpx.AsyncClient(
             timeout=settings.dependency_health_timeout_seconds,
@@ -80,12 +129,15 @@ class AppServices:
                 self._seed_failures.discard(name)
 
     async def shutdown(self) -> None:
-        await asyncio.gather(
+        tasks = [
             self.cache.close(),
+            self.chat_quota.close(),
             self.database.dispose(),
             self._http.aclose(),
-            return_exceptions=True,
-        )
+        ]
+        if self.group_embedding is not None:
+            tasks.append(self.group_embedding.close())
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _mock_api_ping(self) -> None:
         response = await self._http.get(
@@ -103,6 +155,23 @@ class AppServices:
         await self.milvus.ping()
         await self._retry_failed_seed(
             "milvus", lambda: self.milvus.ensure_seed(DEMO_DOCUMENTS)
+        )
+
+    async def _rag_corpus_ready(self) -> None:
+        if self.group_index is None or not self.settings.rag_archive_sha256:
+            raise RuntimeError("group RAG readiness configuration is incomplete")
+        collection, route_collection = versioned_collection_names(
+            self.settings.rag_group_collection_prefix,
+            self.settings.rag_dataset_version,
+            self.settings.rag_archive_sha256,
+        )
+        await self.group_index.ping_active(
+            collection_alias=self.settings.rag_group_collection_alias,
+            route_alias=self.settings.rag_group_route_alias,
+            expected_collection=collection,
+            expected_route_collection=route_collection,
+            expected_chunk_count=self.settings.rag_expected_chunk_count,
+            expected_route_count=self.settings.rag_expected_route_count,
         )
 
     async def _business_ready(self) -> None:
@@ -177,6 +246,8 @@ class AppServices:
             "minio": self.business.object_store.ping,
             "business_seed": self._business_ready,
         }
+        if self.settings.rag_group_enabled:
+            probes["rag_corpus"] = self._rag_corpus_ready
 
         async def run_probe(probe: Callable[[], Awaitable[None]]) -> HealthCheck:
             started = time.perf_counter()

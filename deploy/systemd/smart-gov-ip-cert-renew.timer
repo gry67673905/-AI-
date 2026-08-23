@@ -1,0 +1,11 @@
+[Unit]
+Description=Twice-daily Smart Gov short-lived IP certificate renewal check
+
+[Timer]
+OnCalendar=*-*-* 02,14:20:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=smart-gov-ip-cert-renew.service
+
+[Install]
+WantedBy=timers.target

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     Index,
     JSON,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -491,6 +492,89 @@ class KnowledgeIndexJobRecord(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(24), default="DRAFT", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class KnowledgeDatasetRecord(Base, TimestampMixin):
+    __tablename__ = "knowledge_datasets"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_knowledge_dataset_name_version"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    version: Mapped[str] = mapped_column(String(64))
+    archive_sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    manifest_hash: Mapped[str] = mapped_column(String(64))
+    source_owner: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    license_status: Mapped[str] = mapped_column(String(32), default="UNVERIFIED")
+    status: Mapped[str] = mapped_column(String(24), default="DRAFT", index=True)
+    expected_chunk_count: Mapped[int] = mapped_column(Integer)
+    imported_chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    indexed_chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_model: Mapped[str] = mapped_column(String(100))
+    embedding_dimension: Mapped[int] = mapped_column(Integer)
+    collection_name: Mapped[str] = mapped_column(String(255))
+    route_collection_name: Mapped[str] = mapped_column(String(255))
+    collection_alias: Mapped[str] = mapped_column(String(255))
+    route_alias: Mapped[str] = mapped_column(String(255))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column("manifest", JSON, default=dict)
+
+
+class KnowledgeCorpusChunkRecord(Base):
+    __tablename__ = "knowledge_corpus_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_id", "external_id", name="uq_corpus_chunk_dataset_external"
+        ),
+        Index("ix_corpus_chunk_dataset_status", "dataset_id", "status"),
+        Index("ix_corpus_chunk_content_hash", "content_hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    dataset_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("knowledge_datasets.id", ondelete="CASCADE"),
+        index=True,
+    )
+    external_id: Mapped[str] = mapped_column(String(64))
+    topic_slug: Mapped[str] = mapped_column(String(16), index=True)
+    topic_name: Mapped[str] = mapped_column(String(100))
+    document_title: Mapped[str] = mapped_column(String(500))
+    section: Mapped[str] = mapped_column(String(100))
+    chunk_type: Mapped[str] = mapped_column(String(32))
+    theme: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_content_hash: Mapped[str] = mapped_column(String(64))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="PENDING")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    indexed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class KnowledgeEmbeddingCacheRecord(Base):
+    __tablename__ = "knowledge_embedding_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_hash", "model", "dimension",
+            name="uq_knowledge_embedding_content_model_dimension",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    model: Mapped[str] = mapped_column(String(100))
+    dimension: Mapped[int] = mapped_column(Integer)
+    vector_bytes: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class BusinessAuditEventRecord(Base):

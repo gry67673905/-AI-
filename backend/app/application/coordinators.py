@@ -12,6 +12,7 @@ from app.application.dtos import (
     ChatCommand,
     ChatExecutionContext,
     ChatResult,
+    KnowledgeSearchResult,
     Principal,
     SourceData,
     ToolCallData,
@@ -309,6 +310,14 @@ class ConsultationCoordinator:
             and source.excerpt.strip()
         ]
 
+    async def _search_knowledge(self, query: str) -> KnowledgeSearchResult:
+        search_with_warnings = getattr(
+            self.knowledge, "search_with_warnings", None
+        )
+        if callable(search_with_warnings):
+            return await search_with_warnings(query)
+        return KnowledgeSearchResult(sources=await self.knowledge.search(query))
+
     async def _save_answer(
         self,
         session_id: UUID,
@@ -534,7 +543,7 @@ class ConsultationCoordinator:
             if unmapped_public_service:
                 mcp_result: object = ([], [], [])
                 (knowledge_result,) = await asyncio.gather(
-                    self.knowledge.search(retrieval_query),
+                    self._search_knowledge(retrieval_query),
                     return_exceptions=True,
                 )
             else:
@@ -544,7 +553,7 @@ class ConsultationCoordinator:
                         context.external_item_id,
                         context.public_service is None,
                     ),
-                    self.knowledge.search(retrieval_query),
+                    self._search_knowledge(retrieval_query),
                     return_exceptions=True,
                 )
             if isinstance(mcp_result, BaseException):
@@ -556,7 +565,8 @@ class ConsultationCoordinator:
             if isinstance(knowledge_result, BaseException):
                 warnings.append("milvus_unavailable: 知识检索服务暂不可用")
             else:
-                sources.extend(knowledge_result)
+                sources.extend(knowledge_result.sources)
+                warnings.extend(knowledge_result.warnings)
 
             if not warnings:
                 try:
@@ -572,6 +582,10 @@ class ConsultationCoordinator:
         ):
             sources.append(local_catalog_source)
         sources = self._effective_sources(sources)
+        if any(source.reference.startswith("ragdb://") for source in sources):
+            warnings.append(
+                "rag_group_demo_unverified: 组内演示语料、时效待核验，请以官方最新要求为准"
+            )
 
         if not self.grounding.may_answer(len(sources)):
             answer = (

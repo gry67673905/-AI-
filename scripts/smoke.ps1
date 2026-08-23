@@ -35,13 +35,15 @@ foreach ($requiredSource in @("local_catalog", "mcp", "rag")) {
     }
 }
 
-# RetrievalCache.key_for uses NFKC + lower-case + collapsed whitespace and a
-# public context derived from the selected service's external mapping. Checking
-# the exact v2 key proves that retrieval context was written without paying for
-# a second model invocation.
+# RetrievalCache.key_for uses NFKC + lower-case + collapsed whitespace, the
+# selected service's external mapping, and the active RAG dataset version. The
+# local compose stack leaves group RAG disabled, so Settings resolves the fixed
+# cache dataset component to its default value "none". Cloud verification uses
+# deploy/scripts/verify-cloud-smoke.sh against its pinned dataset instead.
 $normalizedQuestion = $Question.Normalize([Text.NormalizationForm]::FormKC).ToLowerInvariant()
 $normalizedQuestion = ([regex]::Replace($normalizedQuestion, '\s+', ' ')).Trim()
-$keyInput = "$normalizedQuestion|service:$($service.external_item_id)"
+$datasetVersion = "none"
+$keyInput = "$normalizedQuestion|service:$($service.external_item_id)|dataset:$datasetVersion"
 $sha256 = [System.Security.Cryptography.SHA256]::Create()
 try {
     $digestBytes = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($keyInput))
@@ -49,7 +51,7 @@ try {
     $sha256.Dispose()
 }
 $digest = -join ($digestBytes | ForEach-Object { $_.ToString("x2") })
-$cacheKey = "smart-gov:retrieval:v2:$digest"
+$cacheKey = "smart-gov:retrieval:v3:$digest"
 
 $workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $workspaceRoot
@@ -62,7 +64,7 @@ try {
 $cacheExistsLines = @($cacheExistsText | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
 $cacheWritten = $cacheExistsLines.Count -gt 0 -and $cacheExistsLines[-1] -eq "1"
 if (-not $cacheWritten) {
-    throw "The expected Redis v2 retrieval cache entry was not written."
+    throw "The expected Redis v3 retrieval cache entry was not written."
 }
 
 $secondCacheHit = $null
@@ -84,6 +86,7 @@ if ($SecondPaidCall) {
     paid_chat_calls = if ($SecondPaidCall) { 2 } else { 1 }
     request_id = $first.request_id
     source_types = ($sourceKinds -join ',')
-    retrieval_cache_v2_written = $cacheWritten
+    retrieval_dataset_version = $datasetVersion
+    retrieval_cache_v3_written = $cacheWritten
     second_paid_call_cache_hit = $secondCacheHit
 } | ConvertTo-Json -Depth 5

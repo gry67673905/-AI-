@@ -512,6 +512,12 @@ class VoiceStreamBoundary:
     async def stream(self, payload: ChatRequest, request: Request, principal: Annotated[Principal | None, Depends(optional_principal)]) -> StreamingResponse:
         if payload.application_id and principal is None:
             raise AuthenticationRequired("查询办件状态必须登录")
+        quota = getattr(request.app.state.services, "chat_quota", None)
+        if quota is not None:
+            await quota.consume(
+                principal.account_id if principal is not None else None,
+                request.client.host if request.client is not None else "unknown",
+            )
         coordinator = _runtime(request).consultations
 
         async def events():

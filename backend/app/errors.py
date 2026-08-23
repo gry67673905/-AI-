@@ -54,3 +54,8 @@ class BusinessValidationError(ServiceError):
 class DependencyUnavailable(ServiceError):
     def __init__(self, dependency: str):
         super().__init__(f"{dependency}_unavailable", f"{dependency} 暂不可用", 503)
+
+
+class TooManyRequests(ServiceError):
+    def __init__(self, message: str = "今日智能问答额度已用完，请明日再试"):
+        super().__init__("chat_quota_exceeded", message, 429)
