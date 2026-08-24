@@ -537,10 +537,15 @@ class VoiceStreamBoundary:
 
 
 def build_business_router() -> APIRouter:
+    # Local import avoids a module cycle because the integration boundary reuses
+    # the standard optional/current principal dependencies defined above.
+    from app.boundaries.metastudio import MetaStudioHttpBoundary
+
     router = APIRouter(prefix="/api/v1")
     for boundary in (
         AuthHttpBoundary(), CitizenPortalBoundary(), StaffWorkbenchBoundary(),
         AdminConsoleBoundary(), OperationsBoundary(), VoiceStreamBoundary(),
+        MetaStudioHttpBoundary(),
     ):
         router.include_router(boundary.router)
     return router

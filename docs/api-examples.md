@@ -555,7 +555,7 @@ Idempotency-Key: <uuid>
 
 ## 完整 OpenAPI 操作清单
 
-以下 73 个 method/path 与当前最终 `/openapi.json` 一致；版本化团队 RAG 通过运维命令导入，不暴露额外业务路由。请求体、认证和状态规则以上文及实时 OpenAPI 为准。
+以下 76 个 method/path 与当前最终 `/openapi.json` 一致；版本化团队 RAG 通过运维命令导入，不暴露额外业务路由。请求体、认证和状态规则以上文及实时 OpenAPI 为准。
 
 ```text
 GET /health/live
@@ -631,7 +631,51 @@ POST /api/v1/verifications
 POST /api/v1/verifications/{verification_id}/complete
 POST /api/v1/deliveries/{delivery_id}/status
 POST /api/v1/deliveries/{delivery_id}/cancel
+POST /api/v1/integrations/metastudio/client-sessions
+POST /api/v1/integrations/metastudio/llm
+POST /api/v1/integrations/metastudio/action-intents/{intent_id}/exchange
 ```
+
+## 可选 MetaStudio 智能交互
+
+MetaStudio 默认关闭；关闭或服务端 SDK/IAM/robot 配置不完整时，创建客户端会话返回结构化 503，且不会外呼华为云。启用后 Android 原生网关发送空 JSON：
+
+```http
+POST /api/v1/integrations/metastudio/client-sessions
+Content-Type: application/json
+
+{}
+```
+
+响应中的 `once_code` 是短期敏感值，只能在内存中交给本地 SDK 包装页，不写日志、磁盘或 WebView URL。`server_address` 必须是固定北京四白名单地址，robotId 由后端配置提供，三者都不能由 WebView 自定义。
+
+MetaStudio 唯一回调路径同时支持普通响应和 SSE。以下仅展示请求体结构；真实请求的 MSS_A `secret/time_stamp` query 由 MetaStudio 生成，不应复制到文档、命令、日志或工单：
+
+```json
+{
+  "messages": [{"content": "如何办理演示社保卡"}],
+  "app_id": "由服务端校验的应用标识",
+  "user": "供应方会话用户标识",
+  "session_id": "供应方会话标识",
+  "is_stream": true,
+  "extend_param": {"client_id": "合成演示客户端"}
+}
+```
+
+回调边界先验证 HMAC、时间窗与重放，再进入咨询协调者；鉴权失败固定为 400，不能调用 LLM/RAG 或产生动作。数字人建议的政务动作只返回短期 intent，登录客户端还需用 Bearer 交换：
+
+```http
+POST /api/v1/integrations/metastudio/action-intents/{intent_id}/exchange
+Authorization: Bearer <access-token>
+Content-Type: application/json
+
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "chat_id": "供应方会话内消息标识"
+}
+```
+
+交换响应只是需要用户确认的受控动作封包，不能绕过目标业务接口自身的角色、所有权、幂等、版本和状态机校验。完整部署与隐私边界见 [MetaStudio 接入说明](metastudio-integration.md)。
 
 ## 统一错误
 

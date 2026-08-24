@@ -10,6 +10,7 @@ from app.security import (
     mask_personal_text,
     new_refresh_token,
     redact_pii_text,
+    redact_sensitive,
     verify_password,
 )
 
@@ -45,4 +46,5 @@ class LocalSecurityAdapter:
 
     @staticmethod
     def redact_public_text(value: str) -> str:
-        return redact_pii_text(value)
+        redacted = redact_sensitive(value)
+        return redacted if isinstance(redacted, str) else redact_pii_text(str(redacted))

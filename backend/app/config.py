@@ -104,6 +104,46 @@ class Settings(BaseSettings):
     chat_quota_global_daily: int = Field(default=200, ge=1, le=1_000_000)
     pii_hmac_key: SecretStr = SecretStr("local-demo-pii-hmac-change-before-deployment")
 
+    # Huawei MetaStudio third-party-brain integration.  Production deployments
+    # should mount every secret through its *_FILE setting; direct values exist
+    # only to keep local unit tests and secret managers that inject environment
+    # values straightforward.
+    metastudio_enabled: bool = False
+    metastudio_app_id: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{32}$"
+    )
+    metastudio_app_key: SecretStr | None = None
+    metastudio_app_key_file: str | None = None
+    metastudio_callback_url: str = (
+        "https://123.249.68.176/api/v1/integrations/metastudio/llm"
+    )
+    metastudio_project_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$"
+    )
+    metastudio_robot_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$"
+    )
+    metastudio_huawei_access_key: SecretStr | None = None
+    metastudio_huawei_access_key_file: str | None = None
+    metastudio_huawei_secret_key: SecretStr | None = None
+    metastudio_huawei_secret_key_file: str | None = None
+    metastudio_region: Literal["cn-north-4"] = "cn-north-4"
+    metastudio_once_code_endpoint: str = (
+        "https://metastudio.cn-north-4.myhuaweicloud.com"
+    )
+    metastudio_server_address: str = (
+        "metastudio-api.cn-north-4.myhuaweicloud.com"
+    )
+    metastudio_replay_window_seconds: int = Field(default=300, ge=30, le=900)
+    # onceCode launch expiry is fixed at 300 seconds in the coordinator. This
+    # longer Redis context survives SDK startup and the ensuing conversation.
+    metastudio_context_ttl_seconds: int = Field(default=1800, ge=600, le=3600)
+    metastudio_action_intent_ttl_seconds: int = Field(default=300, ge=30, le=300)
+    metastudio_http_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    metastudio_session_quota_anonymous_daily: int = Field(default=5, ge=1, le=1000)
+    metastudio_session_quota_authenticated_daily: int = Field(default=10, ge=1, le=1000)
+    metastudio_session_quota_global_daily: int = Field(default=100, ge=1, le=100_000)
+
 
 @lru_cache
 def get_settings() -> Settings:

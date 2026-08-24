@@ -2,6 +2,7 @@
 .env
 *.local
 key-list.txt
+docs/metastudio-console-values.local.md
 
 # Python
 __pycache__/

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, AsyncIterator
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -103,5 +103,49 @@ class LLMService:
             if not answer:
                 raise RuntimeError("DeepSeek returned an empty response")
             return answer
+        except Exception as exc:
+            raise LLMUnavailable(request_id) from exc
+
+    async def answer_stream(
+        self,
+        question: str,
+        sources: list[SourceData],
+        tool_calls: list[ToolCallData],
+        request_id: UUID,
+    ) -> AsyncIterator[str]:
+        """Yield genuine provider deltas when the configured model supports it."""
+
+        if self.mode == "stub":
+            answer = await self.answer(question, sources, tool_calls, request_id)
+            for start in range(0, len(answer), 24):
+                yield answer[start:start + 24]
+                await asyncio.sleep(0)
+            return
+        try:
+            model = self._get_model()
+            emitted = False
+            async with asyncio.timeout(self.timeout_seconds + 2):
+                async for response in model.astream(
+                    build_messages(question, sources, tool_calls)
+                ):
+                    content = response.content
+                    if isinstance(content, str):
+                        delta = content
+                    elif isinstance(content, list):
+                        delta = "".join(
+                            str(part.get("text", ""))
+                            if isinstance(part, dict)
+                            else str(part)
+                            for part in content
+                        )
+                    else:
+                        delta = str(content) if content is not None else ""
+                    if delta:
+                        emitted = True
+                        yield delta
+            if not emitted:
+                raise RuntimeError("DeepSeek returned an empty stream")
+        except LLMUnavailable:
+            raise
         except Exception as exc:
             raise LLMUnavailable(request_id) from exc

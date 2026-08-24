@@ -88,6 +88,11 @@ class KnowledgeStatus(StrEnum):
     INDEX_FAILED = "INDEX_FAILED"
 
 
+class DigitalHumanIntentStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    CONSUMED = "CONSUMED"
+
+
 class EligibilityOutcome(StrEnum):
     ELIGIBLE = "ELIGIBLE"
     INELIGIBLE = "INELIGIBLE"

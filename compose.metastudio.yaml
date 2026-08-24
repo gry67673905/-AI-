@@ -1,0 +1,45 @@
+name: smart-gov-cloud-demo
+
+# Optional override for the Huawei Cloud MetaStudio integration.  The base
+# cloud stack remains deployable with METASTUDIO_ENABLED=false and therefore
+# does not require vendor credentials or the separately licensed client SDK.
+services:
+  api:
+    environment:
+      METASTUDIO_ENABLED: "true"
+      METASTUDIO_APP_ID: ${METASTUDIO_APP_ID:?set METASTUDIO_APP_ID}
+      METASTUDIO_APP_KEY_FILE: /run/secrets/metastudio_app_key
+      METASTUDIO_CALLBACK_URL: ${METASTUDIO_CALLBACK_URL:?set METASTUDIO_CALLBACK_URL}
+      METASTUDIO_PROJECT_ID: ${METASTUDIO_PROJECT_ID:?set METASTUDIO_PROJECT_ID}
+      METASTUDIO_ROBOT_ID: ${METASTUDIO_ROBOT_ID:?set METASTUDIO_ROBOT_ID}
+      METASTUDIO_HUAWEI_ACCESS_KEY_FILE: /run/secrets/metastudio_huawei_access_key
+      METASTUDIO_HUAWEI_SECRET_KEY_FILE: /run/secrets/metastudio_huawei_secret_key
+      METASTUDIO_REGION: ${METASTUDIO_REGION:-cn-north-4}
+      METASTUDIO_ONCE_CODE_ENDPOINT: ${METASTUDIO_ONCE_CODE_ENDPOINT:-https://metastudio.cn-north-4.myhuaweicloud.com}
+      METASTUDIO_SERVER_ADDRESS: ${METASTUDIO_SERVER_ADDRESS:-metastudio-api.cn-north-4.myhuaweicloud.com}
+      METASTUDIO_REPLAY_WINDOW_SECONDS: ${METASTUDIO_REPLAY_WINDOW_SECONDS:-300}
+      METASTUDIO_CONTEXT_TTL_SECONDS: ${METASTUDIO_CONTEXT_TTL_SECONDS:-1800}
+      METASTUDIO_ACTION_INTENT_TTL_SECONDS: ${METASTUDIO_ACTION_INTENT_TTL_SECONDS:-300}
+      METASTUDIO_SESSION_QUOTA_ANONYMOUS_DAILY: ${METASTUDIO_SESSION_QUOTA_ANONYMOUS_DAILY:-5}
+      METASTUDIO_SESSION_QUOTA_AUTHENTICATED_DAILY: ${METASTUDIO_SESSION_QUOTA_AUTHENTICATED_DAILY:-10}
+      METASTUDIO_SESSION_QUOTA_GLOBAL_DAILY: ${METASTUDIO_SESSION_QUOTA_GLOBAL_DAILY:-100}
+      # SIS is selected and delegated inside MetaStudio. This API never calls
+      # SIS directly and therefore deliberately receives no SIS endpoint/key.
+    secrets:
+      - source: metastudio_app_key
+        target: metastudio_app_key
+        mode: 0400
+      - source: metastudio_huawei_access_key
+        target: metastudio_huawei_access_key
+        mode: 0400
+      - source: metastudio_huawei_secret_key
+        target: metastudio_huawei_secret_key
+        mode: 0400
+
+secrets:
+  metastudio_app_key:
+    file: ./deploy/secrets/metastudio_app_key
+  metastudio_huawei_access_key:
+    file: ./deploy/secrets/metastudio_huawei_access_key
+  metastudio_huawei_secret_key:
+    file: ./deploy/secrets/metastudio_huawei_secret_key

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 from uuid import UUID
 
 from app.application.dtos import Principal, SourceData, ToolCallData
@@ -134,6 +134,27 @@ class BusinessRepositoryPort(Protocol):
     async def recover_stale_knowledge_jobs(self, age_seconds: int | None = None) -> int: ...
     async def prepare_knowledge_retry(self, actor_id: UUID, job_id: UUID) -> list[dict[str, Any]]: ...
     async def archive_knowledge(self, actor_id: UUID, job_id: UUID) -> dict[str, Any]: ...
+    async def create_digital_human_intent(
+        self,
+        owner_account_id: UUID | None,
+        owner_role: Role | None,
+        client_session_id: UUID,
+        provider_session_id_hash: str,
+        intent_type: str,
+        label: str,
+        section: str,
+        prefill: dict[str, Any],
+        expires_at: datetime,
+    ) -> dict[str, Any]: ...
+    async def consume_digital_human_intent(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        actor_role: Role,
+        client_session_id: UUID,
+        client_chat_id_hash: str,
+        now: datetime,
+    ) -> dict[str, Any]: ...
 
 
 class ObjectStorePort(Protocol):
@@ -227,6 +248,23 @@ class ChatModelPort(Protocol):
         tool_calls: list[ToolCallData],
         request_id: UUID,
     ) -> str: ...
+    def answer_stream(
+        self,
+        question: str,
+        sources: list[SourceData],
+        tool_calls: list[ToolCallData],
+        request_id: UUID,
+    ) -> AsyncIterator[str]: ...
+
+
+class MetaStudioOnceCodePort(Protocol):
+    async def create_once_code(self, app_user_id: str) -> str: ...
+
+
+class MetaStudioSessionPort(Protocol):
+    async def put(self, session_id: UUID, values: dict[str, Any], ttl_seconds: int) -> None: ...
+    async def get(self, session_id: UUID) -> dict[str, Any] | None: ...
+    async def claim_replay(self, replay_key: str, ttl_seconds: int) -> bool: ...
 
 
 class KnowledgeVectorPort(VectorIndexPort, KnowledgeRetrievalPort, Protocol):

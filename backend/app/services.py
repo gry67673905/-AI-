@@ -94,6 +94,18 @@ class AppServices:
             authenticated_daily=settings.chat_quota_authenticated_daily,
             global_daily=settings.chat_quota_global_daily,
         )
+        self.metastudio_session_quota = ChatQuota(
+            settings.redis_url,
+            settings.pii_hmac_key.get_secret_value(),
+            enabled=settings.metastudio_enabled and settings.chat_quota_enabled,
+            anonymous_daily=settings.metastudio_session_quota_anonymous_daily,
+            authenticated_daily=settings.metastudio_session_quota_authenticated_daily,
+            global_daily=settings.metastudio_session_quota_global_daily,
+            key_namespace="metastudio-session",
+            dependency_name="metastudio_session_quota",
+            subject_message="今日数字人会话额度已用完，请明日再试",
+            global_message="今日数字人会话总额度已用完，请明日再试",
+        )
         self.business = BusinessRuntime(
             settings,
             self.database.sessions,
@@ -132,6 +144,8 @@ class AppServices:
         tasks = [
             self.cache.close(),
             self.chat_quota.close(),
+            self.metastudio_session_quota.close(),
+            self.business.close(),
             self.database.dispose(),
             self._http.aclose(),
         ]

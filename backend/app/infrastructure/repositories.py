@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from app.domain.enums import (
     AppointmentStatus,
     ApplicationStatus,
     DeliveryStatus,
+    DigitalHumanIntentStatus,
     HandoffStatus,
     KnowledgeStatus,
     PaymentStatus,
@@ -60,6 +62,7 @@ from app.infrastructure.records import (
     ConsultationFeedbackRecord,
     DeliveryOrderRecord,
     DepartmentRecord,
+    DigitalHumanActionIntentRecord,
     EligibilityRuleRecord,
     FaqEntryRecord,
     GovernmentServiceRecord,
@@ -1607,6 +1610,117 @@ class BusinessRepository:
             if department_id:
                 statement = statement.where(ServiceWindowRecord.department_id == department_id)
             return [self._window_dict(item) for item in (await session.scalars(statement)).all()]
+
+    async def create_digital_human_intent(
+        self,
+        owner_account_id: UUID | None,
+        owner_role: Role | None,
+        client_session_id: UUID,
+        provider_session_id_hash: str,
+        intent_type: str,
+        label: str,
+        section: str,
+        prefill: dict[str, Any],
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        record = DigitalHumanActionIntentRecord(
+            owner_account_id=owner_account_id,
+            owner_role=owner_role.value if owner_role else None,
+            client_session_id=client_session_id,
+            chat_id_hash=provider_session_id_hash,
+            intent_type=intent_type,
+            label=label,
+            section=section,
+            prefill_json=redact_sensitive(prefill),
+            status=DigitalHumanIntentStatus.ACTIVE.value,
+            expires_at=expires_at,
+        )
+        async with self._transaction() as session:
+            session.add(record)
+            await session.flush()
+            await self._audit(
+                session,
+                owner_account_id,
+                "digital_human.intent_created",
+                "digital_human_action_intent",
+                record.id,
+                {
+                    "type": intent_type,
+                    "section": section,
+                    "expires_at": expires_at.isoformat(),
+                },
+            )
+        return {
+            "id": record.id,
+            "type": record.intent_type,
+            "label": record.label,
+            "section": record.section,
+            "prefill": dict(record.prefill_json),
+            "expires_at": record.expires_at,
+        }
+
+    async def consume_digital_human_intent(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        actor_role: Role,
+        client_session_id: UUID,
+        client_chat_id_hash: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        async with self._transaction() as session:
+            record = await session.scalar(
+                select(DigitalHumanActionIntentRecord)
+                .where(DigitalHumanActionIntentRecord.id == intent_id)
+                .with_for_update()
+            )
+            if (
+                record is None
+                or record.owner_account_id != actor_id
+                or record.owner_role != actor_role.value
+                or record.client_session_id != client_session_id
+            ):
+                # Deliberately conceal whether another account owns the intent.
+                raise ResourceNotFound("数字人操作意图")
+            if record.status != DigitalHumanIntentStatus.ACTIVE.value:
+                raise ConflictError(
+                    "数字人操作意图已使用",
+                    "digital_human_intent_consumed",
+                )
+            expires_at = record.expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= now:
+                raise ConflictError(
+                    "数字人操作意图已过期",
+                    "digital_human_intent_expired",
+                )
+            record.status = DigitalHumanIntentStatus.CONSUMED.value
+            record.consumed_at = now
+            await self._audit(
+                session,
+                actor_id,
+                "digital_human.intent_exchanged",
+                "digital_human_action_intent",
+                record.id,
+                {
+                    "type": record.intent_type,
+                    "section": record.section,
+                    # Android's semanticRecognized.chatId is per-turn and is
+                    # not the provider callback session_id stored on creation.
+                    # Keep only a pseudonymous audit correlation; ownership,
+                    # role, opaque client session, expiry and row lock are the
+                    # actual authorization boundaries.
+                    "client_chat_id_hash": client_chat_id_hash,
+                },
+            )
+            return {
+                "intent_id": record.id,
+                "type": record.intent_type,
+                "label": record.label,
+                "section": record.section,
+                "prefill": dict(record.prefill_json),
+            }
 
     async def list_audits(self, limit: int = 100) -> list[dict[str, Any]]:
         async with self.sessions() as session:

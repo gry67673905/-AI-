@@ -1,5 +1,14 @@
 limit_req_zone $binary_remote_addr zone=smartgov_ip_api:10m rate=10r/s;
 limit_req_zone $binary_remote_addr zone=smartgov_ip_chat:10m rate=12r/m;
+limit_req_zone $binary_remote_addr zone=smartgov_ip_metastudio:10m rate=5r/s;
+limit_req_zone $binary_remote_addr zone=smartgov_ip_metastudio_sessions:10m rate=1r/s;
+
+# MetaStudio authenticates the LLM callback with `secret` and `time_stamp`
+# query parameters. Never use $request, $request_uri or $args in this format.
+log_format smartgov_ip_metastudio_callback
+    'request_id=$request_id remote=$remote_addr method=$request_method '
+    'uri=$uri status=$status bytes=$body_bytes_sent request_time=$request_time '
+    'upstream_status=$upstream_status';
 
 server {
     listen 80 default_server;
@@ -43,6 +52,10 @@ server {
         internal;
         default_type application/json;
         add_header Retry-After 60 always;
+        # Limit errors from the query-authenticated callback are internally
+        # redirected here, so this named location must remain query-safe too.
+        access_log /var/log/nginx/smart-gov-rate-limit.log smartgov_ip_metastudio_callback;
+        error_log /dev/null crit;
         return 429 '{"error":{"code":"rate_limit_exceeded","message":"请求过于频繁，请稍后重试"}}';
     }
 
@@ -87,6 +100,42 @@ server {
         proxy_connect_timeout 10s;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
+    }
+
+    # The same callback path returns JSON or SSE according to request-body
+    # `is_stream`. Query arguments are forwarded for MSS_A verification but
+    # deliberately excluded from the dedicated access log above.
+    location = /api/v1/integrations/metastudio/llm {
+        limit_req zone=smartgov_ip_metastudio burst=10 nodelay;
+        client_max_body_size 128k;
+        proxy_pass http://127.0.0.1:18000;
+        include proxy_params;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+        access_log /var/log/nginx/smart-gov-metastudio-callback.log smartgov_ip_metastudio_callback;
+        # Nginx error entries may include the raw request line. Suppress them
+        # on this MSS_A query-authenticated path; upstream status remains in
+        # the argument-free dedicated access log and the app emits redacted logs.
+        error_log /dev/null crit;
+    }
+
+    location = /api/v1/integrations/metastudio/client-sessions {
+        limit_req zone=smartgov_ip_metastudio_sessions burst=3 nodelay;
+        client_max_body_size 4k;
+        proxy_pass http://127.0.0.1:18000;
+        include proxy_params;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_http_version 1.1;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
     }
 
     location /api/ {

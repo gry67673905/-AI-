@@ -81,9 +81,34 @@ public final class NativeApiClient {
         boolean idempotentWrite,
         GatewayCallback<JsonElement> callback
     ) {
+        executeInternal(action, pathSegments, query, body,
+            authenticated ? AuthMode.REQUIRED : AuthMode.NONE, idempotentWrite, callback);
+    }
+
+    /** Adds a bearer token when one exists, without exposing it to WebView code. */
+    public void executeOptionalAuth(
+        Action action,
+        String[] pathSegments,
+        Map<String, String> query,
+        JsonObject body,
+        boolean idempotentWrite,
+        GatewayCallback<JsonElement> callback
+    ) {
+        executeInternal(action, pathSegments, query, body, AuthMode.OPTIONAL, idempotentWrite, callback);
+    }
+
+    private void executeInternal(
+        Action action,
+        String[] pathSegments,
+        Map<String, String> query,
+        JsonObject body,
+        AuthMode authMode,
+        boolean idempotentWrite,
+        GatewayCallback<JsonElement> callback
+    ) {
         HttpUrl url = buildUrl(pathSegments, query);
         Request.Builder request = new Request.Builder().url(url).header("Accept", "application/json");
-        if (!authorize(request, authenticated, callback)) return;
+        if (!authorize(request, authMode, callback)) return;
         if (idempotentWrite) request.header("Idempotency-Key", UUID.randomUUID().toString());
         // A zero-length body without a JSON content type accurately represents OpenAPI POST operations
         // that declare no requestBody (for example cancel/retry/archive).
@@ -162,16 +187,19 @@ public final class NativeApiClient {
     public OkHttpClient getHttpClient() { return client; }
     public void cancelAll() { client.dispatcher().cancelAll(); }
 
-    private boolean authorize(Request.Builder request, boolean authenticated, GatewayCallback<?> callback) {
-        if (!authenticated) return true;
+    private boolean authorize(Request.Builder request, AuthMode authMode, GatewayCallback<?> callback) {
+        if (authMode == AuthMode.NONE) return true;
         SecureSessionStore.Snapshot snapshot = sessionStore.load();
         if (!snapshot.isAuthenticated()) {
+            if (authMode == AuthMode.OPTIONAL) return true;
             callback.onError(new ApiFailure(401, "authentication_required", "请先登录"));
             return false;
         }
         request.header("Authorization", snapshot.getSecrets().getTokenType() + " " + snapshot.getSecrets().getAccessToken());
         return true;
     }
+
+    private enum AuthMode { NONE, OPTIONAL, REQUIRED }
 
     private void enqueue(Request request, GatewayCallback<JsonElement> callback) {
         client.newCall(request).enqueue(new okhttp3.Callback() {

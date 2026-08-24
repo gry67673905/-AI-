@@ -10,6 +10,7 @@ require_command docker
 require_command sha256sum
 require_cloud_files
 require_secrets
+require_metastudio_config
 
 backup_root="${SMART_GOV_BACKUP_ROOT:-/var/backups/smart-gov-assistant}"
 backup_dir=""
@@ -45,6 +46,10 @@ cloud_compose --profile ops run --rm minio-backup
 unset BACKUP_DIR
 
 install -m 600 "$COMPOSE_FILE" "${backup_dir}/config/compose.cloud.yaml"
+if metastudio_enabled; then
+    install -m 600 "$METASTUDIO_COMPOSE_FILE" \
+        "${backup_dir}/config/compose.metastudio.yaml"
+fi
 install -m 600 "$CLOUD_ENV_FILE" "${backup_dir}/config/cloud.env"
 tar -C "${PROJECT_ROOT}/deploy" -czf "${backup_dir}/config/docker-secrets.tar.gz" secrets
 chmod 600 "${backup_dir}/config/docker-secrets.tar.gz"

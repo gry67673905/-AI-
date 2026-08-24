@@ -18,6 +18,7 @@ from app.application.coordinators import (
     ReviewCoordinator,
     VerificationCoordinator,
 )
+from app.application.metastudio import MetaStudioCoordinator
 from app.application.ports import (
     ChatModelPort,
     ChatPersistencePort,
@@ -37,6 +38,12 @@ from app.infrastructure.providers import (
 )
 from app.infrastructure.repositories import BusinessRepository
 from app.infrastructure.security_adapter import LocalSecurityAdapter
+from app.infrastructure.metastudio import (
+    HuaweiMetaStudioOnceCodeAdapter,
+    MetaStudioCallbackAuthenticator,
+    RedisMetaStudioSessionAdapter,
+    secret_value,
+)
 
 
 class BusinessRuntime:
@@ -109,6 +116,42 @@ class BusinessRuntime:
             model,
             self.security,
         )
+        self.metastudio_sessions = RedisMetaStudioSessionAdapter(settings.redis_url)
+        self.metastudio_once_codes = HuaweiMetaStudioOnceCodeAdapter(
+            enabled=settings.metastudio_enabled,
+            endpoint=settings.metastudio_once_code_endpoint,
+            project_id=settings.metastudio_project_id,
+            access_key=secret_value(
+                settings.metastudio_huawei_access_key,
+                settings.metastudio_huawei_access_key_file,
+            ),
+            secret_key=secret_value(
+                settings.metastudio_huawei_secret_key,
+                settings.metastudio_huawei_secret_key_file,
+            ),
+            timeout_seconds=settings.metastudio_http_timeout_seconds,
+        )
+        self.metastudio_authenticator = MetaStudioCallbackAuthenticator(
+            enabled=settings.metastudio_enabled,
+            app_id=settings.metastudio_app_id,
+            app_key=secret_value(
+                settings.metastudio_app_key, settings.metastudio_app_key_file
+            ),
+            callback_url=settings.metastudio_callback_url,
+            replay_window_seconds=settings.metastudio_replay_window_seconds,
+            sessions=self.metastudio_sessions,
+        )
+        self.metastudio = MetaStudioCoordinator(
+            self.repository,
+            self.consultations,
+            self.metastudio_sessions,
+            self.metastudio_once_codes,
+            pii_hmac_key=settings.pii_hmac_key.get_secret_value(),
+            robot_id=settings.metastudio_robot_id,
+            server_address=settings.metastudio_server_address,
+            context_ttl_seconds=settings.metastudio_context_ttl_seconds,
+            action_intent_ttl_seconds=settings.metastudio_action_intent_ttl_seconds,
+        )
         self.applications = ApplicationCoordinator(
             self.repository,
             self.object_store,
@@ -172,3 +215,10 @@ class BusinessRuntime:
             if active_chunks:
                 await self.vector_index.activate_chunks(active_chunks)
             self._startup_complete = True
+
+    async def close(self) -> None:
+        await asyncio.gather(
+            self.metastudio_sessions.close(),
+            self.metastudio_once_codes.close(),
+            return_exceptions=True,
+        )

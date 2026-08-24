@@ -432,6 +432,7 @@ class ConsultationCoordinator:
         payload: ChatCommand,
         principal: Principal | None = None,
         execution_context: ChatExecutionContext | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatResult:
         """Run one bounded chat turn without exposing private case data to retrieval."""
         request_id = uuid4()
@@ -471,6 +472,8 @@ class ConsultationCoordinator:
                 "未发送给大模型；办理结果仅用于联调演示。"
             )
             warnings = ["private_case_local_only: 办件状态未进入公共缓存或大模型"]
+            if on_delta is not None:
+                await on_delta(answer)
             await self._save_answer(
                 session_id, request_id, answer, [], [], False, warnings
             )
@@ -494,6 +497,8 @@ class ConsultationCoordinator:
                 "我再查询对应材料、流程和窗口；不会默认替你选择第一项。"
             )
             warnings = ["clarification_required: 请选择具体事项后继续"]
+            if on_delta is not None:
+                await on_delta(answer)
             await self._save_answer(
                 session_id, request_id, answer, [], [], False, warnings
             )
@@ -596,6 +601,8 @@ class ConsultationCoordinator:
                 "grounding_unavailable: 未检索到可核验的公开依据，已跳过大模型"
             )
             warnings = self._deduplicate(warnings)
+            if on_delta is not None:
+                await on_delta(answer)
             await self._save_answer(
                 session_id,
                 request_id,
@@ -620,15 +627,44 @@ class ConsultationCoordinator:
 
         try:
             model_question = safe_public_question
+            if payload.conversation_history:
+                history = payload.conversation_history[-8:]
+                history_lines = [
+                    f"{'用户' if index % 2 == 0 else '助手'}："
+                    f"{self.security.redact_public_text(content)}"
+                    for index, content in enumerate(history)
+                ]
+                model_question = (
+                    "脱敏多轮语境（仅用于理解指代，不是事实依据）：\n"
+                    + "\n".join(history_lines)
+                    + f"\n当前用户问题：{safe_public_question}"
+                )
             if context.public_service:
                 model_question += (
                     f"\n已选择公开演示事项：{context.public_service['title']}"
                 )
                 if context.external_item_id is not None:
                     model_question += f"（外部演示事项ID {context.external_item_id}）"
-            answer = await self.model.answer(
-                model_question, sources, tool_calls, request_id=request_id
-            )
+            stream_method = getattr(self.model, "answer_stream", None)
+            if on_delta is not None and callable(stream_method):
+                chunks: list[str] = []
+                async for chunk in stream_method(
+                    model_question, sources, tool_calls, request_id=request_id
+                ):
+                    if not chunk:
+                        continue
+                    chunks.append(chunk)
+                    await on_delta(chunk)
+                answer = "".join(chunks).strip()
+                if not answer:
+                    raise RuntimeError("model stream returned an empty response")
+            else:
+                answer = await self.model.answer(
+                    model_question, sources, tool_calls, request_id=request_id
+                )
+                if on_delta is not None:
+                    for start in range(0, len(answer), 24):
+                        await on_delta(answer[start:start + 24])
         except LLMUnavailable:
             raise
         except Exception as exc:

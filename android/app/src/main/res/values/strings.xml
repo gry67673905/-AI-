@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">智慧政务助手</string>
+    <string name="digital_human_open">数字人咨询</string>
+    <string name="digital_human_unsupported">数字人（设备不支持）</string>
+    <string name="digital_human_preparing">正在准备安全数字人会话…</string>
+    <string name="digital_human_close">关闭</string>
 </resources>

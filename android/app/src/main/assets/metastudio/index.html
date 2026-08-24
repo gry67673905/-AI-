@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' data: 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://metastudio-api.cn-north-4.myhuaweicloud.com https://*.dbankcdn.com https://*.dbankcdn.cn https://*.dbankcloud.ru https://*.dbankcloud.cn https://*.dbankcloud.com https://*.hicloud.cn https://*.hicloud.com https://*.dbankedge.cn; font-src 'self' data:; connect-src https://metastudio-api.cn-north-4.myhuaweicloud.com wss://metastudio-api.cn-north-4.myhuaweicloud.com https://metastudio-control.cn-southwest-2.myhuaweicloud.com wss://metastudio-control.cn-southwest-2.myhuaweicloud.com https://metastudio-api.cn-north-4.myhuaweicloud.com:6447 wss://metastudio-api.cn-north-4.myhuaweicloud.com:6447 https://*.dbankcdn.com wss://*.dbankcdn.com https://*.dbankcdn.com:6447 wss://*.dbankcdn.com:6447 https://*.dbankcdn.cn wss://*.dbankcdn.cn https://*.dbankcdn.cn:6447 wss://*.dbankcdn.cn:6447 https://*.dbankcloud.ru wss://*.dbankcloud.ru https://*.dbankcloud.ru:6447 wss://*.dbankcloud.ru:6447 https://*.dbankcloud.cn wss://*.dbankcloud.cn https://*.dbankcloud.cn:6447 wss://*.dbankcloud.cn:6447 https://*.dbankcloud.com wss://*.dbankcloud.com https://*.dbankcloud.com:6447 wss://*.dbankcloud.com:6447 https://*.hicloud.cn wss://*.hicloud.cn https://*.hicloud.cn:6447 wss://*.hicloud.cn:6447 https://*.hicloud.com wss://*.hicloud.com https://*.hicloud.com:6447 wss://*.hicloud.com:6447 https://*.dbankedge.cn wss://*.dbankedge.cn https://*.dbankedge.cn:6447 wss://*.dbankedge.cn:6447; media-src 'self' blob: mediastream: https://metastudio-api.cn-north-4.myhuaweicloud.com https://*.dbankcdn.com https://*.dbankcdn.cn https://*.dbankcloud.ru https://*.dbankcloud.cn https://*.dbankcloud.com https://*.hicloud.cn https://*.hicloud.com https://*.dbankedge.cn; worker-src 'self' blob: data:; child-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>智慧政务数字人</title>
+    <link rel="stylesheet" href="sdk/HwICSUiSdk.css">
+    <link rel="stylesheet" href="style.css">
+    <script defer src="sdk/HwICSUiSdk.js"></script>
+    <script defer src="app.js"></script>
+</head>
+<body>
+    <main id="digital-human-shell">
+        <div id="ics-sdk" aria-label="智慧政务智能交互数字人"></div>
+        <section id="hard-gate" role="alert" hidden>
+            <h1>数字人暂不可用</h1>
+            <p id="hard-gate-message">当前环境未通过安全检查。</p>
+            <button id="close-button" type="button">返回政务工作台</button>
+        </section>
+    </main>
+</body>
+</html>

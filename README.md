@@ -13,10 +13,10 @@
 | `mcp-server/` | Node Streamable HTTP MCP，只读调用模拟政务目录 |
 | `mock-gov-api/` | 六个演示事项及材料、流程、窗口 REST 数据 |
 | `compose.yaml` | PostgreSQL 16、Redis 7、Milvus、etcd、MinIO、API、MCP 与 Mock API |
-| `compose.cloud.yaml`、`deploy/` | 云端演示 Compose、Docker secrets、HTTPS、备份/回滚和显式付费 RAG 导入脚本 |
+| `compose.cloud.yaml`、`compose.metastudio.yaml`、`deploy/` | 云端演示 Compose、可选 MetaStudio 覆盖、Docker secrets、HTTPS、备份/回滚和显式付费 RAG 导入脚本 |
 | `scripts/` | 环境初始化、启动、迁移、业务验收、AI 验收、日志、测试和非破坏性停止 |
 
-设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md)、[API 示例](docs/api-examples.md) 和 [云端部署手册](docs/cloud-deployment.md)。
+设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md)、[API 示例](docs/api-examples.md)、[MetaStudio 接入说明](docs/metastudio-integration.md) 和 [云端部署手册](docs/cloud-deployment.md)。
 
 ## 前置条件
 
@@ -44,7 +44,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health/ready | ConvertTo-Json -Depth 10
 .\scripts\logs.ps1
 ```
 
-API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；当前 OpenAPI 共 73 个 method/path。默认本地栈未启用团队 RAG，`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。云端启用固定团队数据集后新增 `rag_corpus`，共 8 项，并校验激活别名准确指向 15,858 条内容向量和 1,012 条文档路由向量。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`，其他本地依赖默认仅在 Compose 网络中可达。
+API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；当前 OpenAPI 共 76 个 method/path。默认本地栈未启用团队 RAG，`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。云端启用固定团队数据集后新增 `rag_corpus`，共 8 项，并校验激活别名准确指向 15,858 条内容向量和 1,012 条文档路由向量。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`，其他本地依赖默认仅在 Compose 网络中可达。
 
 ## 演示账号
 
@@ -108,7 +108,7 @@ LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或�
 .\scripts\migrate.ps1
 ```
 
-启动时 API 也会执行 `alembic upgrade head`。当前 head 为 `0005_rag_corpus`，在既有业务表之外增加版本化团队语料、分块检查点与 embedding 缓存；迁移保留 `0001_initial` 的匿名聊天，脚本不会 downgrade、删表或删除数据卷。
+启动时 API 也会执行 `alembic upgrade head`。当前 head 为 `0006_metastudio`：`0005_rag_corpus` 增加版本化团队语料、分块检查点与 embedding 缓存，`0006_metastudio` 只增加短期数字人动作意图表；迁移保留 `0001_initial` 的匿名聊天，脚本不会 downgrade、删表或删除数据卷。
 
 ## 主要 API
 
@@ -150,3 +150,5 @@ WebView 只加载受信任的本地资产。JS Bridge 仅暴露校验后的命�
 仓库已提供 Linux x86_64 云端演示部署文件：API 仅绑定 `127.0.0.1:18000`，公网由 Nginx 与官方 lego v5.4.0 管理的 Let’s Encrypt `shortlived` IP 证书提供 `https://123.249.68.176`；TCP 80 必须持续开放给无停机 HTTP-01 续期，密钥通过 `deploy/secrets/` 只读挂载。首次部署保持 `RAG_GROUP_ENABLED=false` 并通过 7 项 readiness；确认 DashScope 一次性 embedding 费用后，才可显式运行 `deploy/scripts/import-rag.sh --confirm-paid-import` 导入固定数据集 `team-2026-08-22-v1`，成功后必须通过含 `rag_corpus` 的 8 项 readiness。原始 `RAG_DATABASE .zip` 含废弃凭据及非业务文件，禁止上传；云端只使用忽略提交的净化归档。
 
 完整的 IP 证书、部署、RAG 导入、一次付费 smoke、零额外付费公网验收、流量切换、旧服务备份/恢复和 APK 构建顺序见 [云端部署手册](docs/cloud-deployment.md)。旧 Certbot、域名 TLS-ALPN 脚本仅为历史回退材料，本次 IP 部署禁止调用。这仍是演示环境：Mock API 和 Demo Provider 不是正式政务能力；正式上线前还必须完成真实身份/租户隔离、密钥托管、病毒扫描、授权审计、隐私和合规评估。
+
+MetaStudio 智能交互默认关闭，固定使用方案二“第三方大脑回调”。启用时云端会叠加 `compose.metastudio.yaml`，并在启动前强制核验官方 Web SDK 5.0.6 的固定 ZIP/CMS 证据和完整 11 项资产、robotId、北京四项目/App 配置以及文件化 IAM/App secrets；任一缺失都不会降级启动。SIS 只由 MetaStudio 委托调用，后端没有 SIS endpoint 或凭据。唯一 LLM 回调为 `/api/v1/integrations/metastudio/llm`，普通响应与 SSE 共用此路径，Nginx 关闭缓冲且包括 429 分支在内的专用日志都不记录 MSS_A query。Android 10 与 Android 12+ 真机 WebView/RTC/SIS PoC 未全部通过前，数字人 APK 不得发布。详细控制台参数、隐私边界和零付费 smoke 见 [MetaStudio 接入说明](docs/metastudio-integration.md)。

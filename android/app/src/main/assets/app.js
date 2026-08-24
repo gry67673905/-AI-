@@ -83,6 +83,51 @@
         });
     };
 
+    const applyDigitalHumanIntent = (event) => {
+        if (!event.requires_confirmation || typeof event.section !== 'string') {
+            showAlert('数字人操作建议未通过确认策略。');
+            return;
+        }
+        const allowed = (navigation[role] || navigation.ANONYMOUS).some(([id]) => id === event.section);
+        if (!allowed) {
+            showAlert('当前账号不能打开数字人建议的工作台。');
+            return;
+        }
+        selectSection(event.section);
+        const prefill = event.prefill && typeof event.prefill === 'object' && !Array.isArray(event.prefill)
+            ? event.prefill : {};
+        const fields = Object.freeze({
+            chat_message: ['chat-message'],
+            service_query: ['service-query'],
+            service_id: ['service-id', 'application-service-id', 'appointment-service', 'admin-service-id'],
+            applicant_type: ['service-applicant'],
+            account: ['login-account'],
+            application_id: ['application-id', 'payment-application', 'verification-application'],
+            requirement_id: ['requirement-id'],
+            application_version: ['application-version'],
+            payment_id: ['payment-id'],
+            verification_id: ['verification-id'],
+            delivery_id: ['delivery-id'],
+            window_id: ['window-id', 'appointment-window', 'admin-window-id'],
+            appointment_id: ['appointment-id'],
+            task_id: ['staff-task-id'],
+            ticket_id: ['citizen-ticket-id', 'staff-ticket-id'],
+            department_id: ['admin-service-department', 'admin-staff-department'],
+            user_id: ['admin-user-id'],
+            version_id: ['admin-version-id'],
+            knowledge_job_id: ['admin-knowledge-job']
+        });
+        Object.entries(prefill).forEach(([key, value]) => {
+            const ids = fields[key];
+            if (!ids || typeof value !== 'string') return;
+            ids.forEach((id) => {
+                const input = byId(id);
+                if (input && 'value' in input) input.value = value;
+            });
+        });
+        showAlert(`数字人建议：${event.label || '继续办理'}。请核对预填信息后在当前页面确认。`, 'info');
+    };
+
     const renderNavigation = () => {
         const nav = byId('primary-nav');
         nav.replaceChildren();
@@ -320,6 +365,7 @@
             if (event.type === 'voice_state') byId('voice-status').textContent = `语音状态：${event.state}`;
             if (event.type === 'boundary_error') showAlert(event.message || '原生能力调用失败');
             if (event.type === 'document_cancelled') showAlert('已取消文件选择。', 'info');
+            if (event.type === 'digital_human_intent') applyDigitalHumanIntent(event);
         }
     });
 

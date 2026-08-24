@@ -1,0 +1,42 @@
+:root {
+    color-scheme: light;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #eef7ff;
+}
+
+html, body, #digital-human-shell, #ics-sdk {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+}
+
+#hard-gate {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    gap: 12px;
+    padding: 32px;
+    text-align: center;
+    background: #eef7ff;
+    color: #1a2433;
+}
+
+#hard-gate[hidden] {
+    display: none;
+}
+
+#hard-gate h1, #hard-gate p {
+    margin: 0;
+}
+
+#close-button {
+    min-height: 48px;
+    padding: 10px 18px;
+    border: 0;
+    border-radius: 10px;
+    color: #fff;
+    background: #1769e0;
+    font: inherit;
+}

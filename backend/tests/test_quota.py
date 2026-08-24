@@ -115,6 +115,27 @@ async def test_enabled_quota_fails_closed_when_redis_is_unavailable() -> None:
     assert getattr(error.value, "status_code", None) == 503
 
 
+@pytest.mark.asyncio
+async def test_separate_quota_namespace_cannot_consume_chat_budget() -> None:
+    quota = ChatQuota(
+        "redis://unused",
+        "test-hmac-key",
+        enabled=True,
+        anonymous_daily=5,
+        authenticated_daily=10,
+        global_daily=100,
+        key_namespace="metastudio-session",
+    )
+    fake = FakeRedis([1, 0, 1, 1])
+    quota.client = fake  # type: ignore[assignment]
+
+    await quota.consume(None, "203.0.113.10")
+
+    serialized = " ".join(str(item) for item in fake.calls[0])
+    assert "quota:metastudio-session:" in serialized
+    assert "quota:chat:" not in serialized
+
+
 def test_demo_environment_requires_explicit_acknowledgement() -> None:
     settings = Settings(
         ENVIRONMENT="demo",

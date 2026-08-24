@@ -25,3 +25,20 @@ def test_pii_is_removed_before_llm_context() -> None:
     assert "13800138000" not in text
     assert "110101199001011234" not in text
     assert "demo@example.com" not in text
+
+
+def test_pii_redaction_handles_asr_separators_and_chinese_digits() -> None:
+    text = redact_pii_text(
+        "电话138-0013-8000或一三八零零一三八零零零，"
+        "另一个念法幺三八 零零幺三 八零零零，"
+        "逐位念1 3 8 0 0 1 3 8 0 0 0，"
+        "点号138.0013.8000，证件110101/19900101/1234"
+    )
+    assert "138-0013-8000" not in text
+    assert "一三八零零一三八零零零" not in text
+    assert "幺三八 零零幺三 八零零零" not in text
+    assert "1 3 8 0 0 1 3 8 0 0 0" not in text
+    assert "138.0013.8000" not in text
+    assert "110101/19900101/1234" not in text
+    assert text.count("[REDACTED_PHONE]") == 5
+    assert "[REDACTED_ID]" in text

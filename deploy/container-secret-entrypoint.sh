@@ -35,6 +35,25 @@ prepare_app_runtime() {
     export USER=app
     export LOGNAME=app
     export DASHSCOPE_API_KEY_FILE=/tmp/smartgov-app-secrets/dashscope_api_key
+    case "${METASTUDIO_ENABLED:-false}" in
+        true|TRUE|1)
+            require_secret_file metastudio_app_key
+            require_secret_file metastudio_huawei_access_key
+            require_secret_file metastudio_huawei_secret_key
+            install -o app -g app -m 400 \
+                /run/secrets/metastudio_app_key \
+                /tmp/smartgov-app-secrets/metastudio_app_key
+            install -o app -g app -m 400 \
+                /run/secrets/metastudio_huawei_access_key \
+                /tmp/smartgov-app-secrets/metastudio_huawei_access_key
+            install -o app -g app -m 400 \
+                /run/secrets/metastudio_huawei_secret_key \
+                /tmp/smartgov-app-secrets/metastudio_huawei_secret_key
+            export METASTUDIO_APP_KEY_FILE=/tmp/smartgov-app-secrets/metastudio_app_key
+            export METASTUDIO_HUAWEI_ACCESS_KEY_FILE=/tmp/smartgov-app-secrets/metastudio_huawei_access_key
+            export METASTUDIO_HUAWEI_SECRET_KEY_FILE=/tmp/smartgov-app-secrets/metastudio_huawei_secret_key
+            ;;
+    esac
 }
 
 service_kind="${1:-}"
@@ -59,8 +78,10 @@ case "$service_kind" in
         unset POSTGRES_PASSWORD REDIS_PASSWORD
         # The only host binding is loopback and the public hop is the managed
         # Nginx instance, so forwarded client IPs are trusted for quota keys.
+        # Uvicorn's raw request log includes query strings; Nginx owns cloud
+        # access logging so MetaStudio MSS_A arguments never reach Docker logs.
         exec setpriv --reuid=app --regid=app --init-groups \
-            sh -c 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"'
+            sh -c 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*" --no-access-log'
         ;;
     redis)
         read_secret redis_password REDIS_PASSWORD

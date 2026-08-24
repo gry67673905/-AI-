@@ -3,8 +3,9 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-COMPOSE_FILE="${PROJECT_ROOT}/compose.cloud.yaml"
-CLOUD_ENV_FILE="${PROJECT_ROOT}/deploy/cloud.env"
+COMPOSE_FILE="${COMPOSE_FILE:-${PROJECT_ROOT}/compose.cloud.yaml}"
+METASTUDIO_COMPOSE_FILE="${METASTUDIO_COMPOSE_FILE:-${PROJECT_ROOT}/compose.metastudio.yaml}"
+CLOUD_ENV_FILE="${CLOUD_ENV_FILE:-${PROJECT_ROOT}/deploy/cloud.env}"
 SECRETS_DIR="${PROJECT_ROOT}/deploy/secrets"
 STATE_DIR="${PROJECT_ROOT}/deploy/state"
 # shellcheck disable=SC2034  # Used by scripts that source this library.
@@ -30,18 +31,25 @@ require_command() {
 require_cloud_files() {
     [ -f "$COMPOSE_FILE" ] || die "Missing compose.cloud.yaml."
     [ -f "$CLOUD_ENV_FILE" ] || die "Missing deploy/cloud.env; copy cloud.env.example first."
+    if metastudio_enabled; then
+        [ -f "$METASTUDIO_COMPOSE_FILE" ] || die "Missing compose.metastudio.yaml."
+    fi
 }
 
 cloud_compose() {
     local resolved_release="${RELEASE_TAG:-}"
+    local -a compose_files=(-f "$COMPOSE_FILE")
+    if metastudio_enabled; then
+        compose_files+=(-f "$METASTUDIO_COMPOSE_FILE")
+    fi
     if [ -z "$resolved_release" ] && [ -s "${STATE_DIR}/current-release" ]; then
         resolved_release="$(<"${STATE_DIR}/current-release")"
         validate_release_tag "$resolved_release"
     fi
     if [ -n "$resolved_release" ]; then
-        RELEASE_TAG="$resolved_release" docker compose --project-directory "$PROJECT_ROOT" --env-file "$CLOUD_ENV_FILE" -f "$COMPOSE_FILE" "$@"
+        RELEASE_TAG="$resolved_release" docker compose --project-directory "$PROJECT_ROOT" --env-file "$CLOUD_ENV_FILE" "${compose_files[@]}" "$@"
     else
-        docker compose --project-directory "$PROJECT_ROOT" --env-file "$CLOUD_ENV_FILE" -f "$COMPOSE_FILE" "$@"
+        docker compose --project-directory "$PROJECT_ROOT" --env-file "$CLOUD_ENV_FILE" "${compose_files[@]}" "$@"
     fi
 }
 
@@ -74,6 +82,157 @@ set_cloud_env_value() {
     ' "$CLOUD_ENV_FILE" >"$temporary"
     install -m 600 "$temporary" "$CLOUD_ENV_FILE"
     rm -f "$temporary"
+}
+
+metastudio_enabled() {
+    [ -f "$CLOUD_ENV_FILE" ] || return 1
+    case "$(cloud_env_value METASTUDIO_ENABLED)" in
+        true|TRUE|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_metastudio_config() {
+    local key value
+    # Cloud deployment must never fall back to direct plaintext credential
+    # variables. Only the Docker secret file paths in the Compose override are
+    # permitted. Enforce this even while the optional feature is disabled so a
+    # dormant credential cannot leak into release snapshots or backups.
+    for key in \
+        METASTUDIO_APP_KEY \
+        METASTUDIO_HUAWEI_ACCESS_KEY \
+        METASTUDIO_HUAWEI_SECRET_KEY; do
+        [ -z "$(cloud_env_value "$key")" ] ||
+            die "Do not place ${key} in deploy/cloud.env; use its Docker secret file."
+    done
+
+    metastudio_enabled || return 0
+    require_command python3
+
+    for key in METASTUDIO_APP_ID METASTUDIO_PROJECT_ID METASTUDIO_ROBOT_ID; do
+        value="$(cloud_env_value "$key")"
+        [ -n "$value" ] || die "MetaStudio configuration is missing ${key}."
+        case "$value" in
+            CONFIGURE_BEFORE_ENABLE|CHANGE_ME|SET_ME|UNSET)
+                die "MetaStudio configuration still contains a placeholder: ${key}."
+                ;;
+        esac
+        if [ "$key" = METASTUDIO_APP_ID ]; then
+            [[ "$value" =~ ^[0-9a-f]{32}$ ]] ||
+                die "MetaStudio APPID must be exactly 32 lowercase hexadecimal characters."
+        else
+            [[ "$value" =~ ^[A-Za-z0-9._-]{1,128}$ ]] ||
+                die "MetaStudio identifier has an unsafe format: ${key}."
+        fi
+    done
+
+    [ "$(cloud_env_value METASTUDIO_SDK_VERSION)" = 5.0.6 ] ||
+        die "MetaStudio client SDK version must be exactly 5.0.6."
+    [ "$(cloud_env_value METASTUDIO_REGION)" = cn-north-4 ] ||
+        die "MetaStudio region must be Huawei Cloud Beijing-4 (cn-north-4)."
+    [ "$(cloud_env_value METASTUDIO_ONCE_CODE_ENDPOINT)" = \
+        https://metastudio.cn-north-4.myhuaweicloud.com ] ||
+        die "MetaStudio once-code endpoint is not the pinned Beijing-4 endpoint."
+    [ "$(cloud_env_value METASTUDIO_SERVER_ADDRESS)" = \
+        metastudio-api.cn-north-4.myhuaweicloud.com ] ||
+        die "MetaStudio client endpoint is not the pinned Beijing-4 endpoint."
+    python3 - \
+        "$(cloud_env_value METASTUDIO_CALLBACK_URL)" \
+        "${PROJECT_ROOT}/android/app/src/main/assets/metastudio/sdk" \
+        "$(cloud_env_value METASTUDIO_SDK_VERSION)" \
+        "${SECRETS_DIR}/metastudio_app_key" \
+        "${SECRETS_DIR}/metastudio_huawei_access_key" \
+        "${SECRETS_DIR}/metastudio_huawei_secret_key" <<'PY'
+import json
+import hashlib
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+callback = urlsplit(sys.argv[1])
+if (
+    sys.argv[1] != "https://123.249.68.176/api/v1/integrations/metastudio/llm"
+    or
+    callback.scheme != "https"
+    or not callback.hostname
+    or callback.username is not None
+    or callback.password is not None
+    or callback.query
+    or callback.fragment
+    or callback.path != "/api/v1/integrations/metastudio/llm"
+):
+    raise SystemExit("MetaStudio callback must be the pinned argument-free public HTTPS IP integration URL.")
+
+sdk_dir = Path(sys.argv[2])
+marker_path = sdk_dir / "sdk-integrity.json"
+expected_archive_sha256 = "d8d028588b35580856d8cc1fc35b67b50fbc8f99525c45ea5d990feec86c7641"
+expected_cms_sha256 = "2bae230d3585e753adec0f001b81eb080f66c1a9cd2b99dea59c1f2827bbf0ea"
+expected_signer_thumbprint = "ad39bc7c7a3d6bc0df3e91d53c023aabecc62b64"
+expected_files = {
+    "HwICSUiSdk.css": "da0cf9bd498ae2ab929a498f61c7a2c5aa025c73eb9a4bee7205e2a2f6752411",
+    "HwICSUiSdk.d.ts": "ac217d3b81707a0afe912c9dfd8e0324b5518252d9cb1c0a4c007949a4fe82ec",
+    "HwICSUiSdk.esm.js": "cc76cfe04fad8cbfd5d8136a397ed5d524e753e803ee459ea99e85a6c7d7d9e2",
+    "HwICSUiSdk.js": "3e481679f7a556c90c83e7646315c09c74a16164c92a33404ba269b17aa0b17f",
+    "images/aiChatImg.png": "d0103b231e6eddb728e850df06243eb49efdb62bc95a90f0cbbe28a90650b1b7",
+    "images/bg_mobile.png": "c93137284a011cee4c271a9344b9ea3866b7abe71d5337308d557afde490c48e",
+    "images/bg.png": "e2ae567b7f4935e1eebe2f7dbede67f45820f8a5a3118c402bf568f32ecf5477",
+    "modelData.js": "775cf9362fc3c98fcbc6fda571f8341c636347a9287b85cadd6b92589fd70970",
+    "package.json": "2eb945ddeec3be3a9726da64cf774b65e96f1630a78c429fac0b921f6cf4ebf3",
+    "provenance/HwICSUiSdk-5.0.6.zip.cms": expected_cms_sha256,
+    "wasmData.js": "18620018c309eb0f601f4137e2a39a136ce3fedd6259232f457b2d704e4203d9",
+}
+if sdk_dir.is_symlink() or not sdk_dir.is_dir():
+    raise SystemExit("MetaStudio 5.0.6 SDK directory is missing/unsafe.")
+if not marker_path.is_file() or marker_path.is_symlink() or marker_path.stat().st_size == 0:
+    raise SystemExit("MetaStudio 5.0.6 SDK integrity proof is missing/unsafe.")
+try:
+    manifest = json.loads(marker_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit("MetaStudio SDK integrity proof is invalid.") from exc
+if (
+    manifest.get("version") != sys.argv[3]
+    or manifest.get("cms_verified") is not True
+    or str(manifest.get("archive_sha256", "")).lower() != expected_archive_sha256
+    or str(manifest.get("cms_sha256", "")).lower() != expected_cms_sha256
+    or str(manifest.get("signer_thumbprint", "")).lower() != expected_signer_thumbprint
+):
+    raise SystemExit("MetaStudio SDK version, archive, CMS or signer proof is not the pinned 5.0.6 release.")
+declared_files = manifest.get("files")
+if not isinstance(declared_files, dict) or declared_files != expected_files:
+    raise SystemExit("MetaStudio SDK integrity manifest does not contain the exact pinned 11-file inventory.")
+actual_paths = set()
+for path in sdk_dir.rglob("*"):
+    if path == marker_path:
+        continue
+    if path.is_symlink():
+        raise SystemExit("MetaStudio SDK contains a symbolic-link asset or directory.")
+    if path.is_dir():
+        continue
+    if not path.is_file() or path.stat().st_size == 0:
+        raise SystemExit("MetaStudio SDK contains an empty, non-regular or symbolic-link asset.")
+    actual_paths.add(path.relative_to(sdk_dir).as_posix())
+if actual_paths != set(expected_files):
+    raise SystemExit("MetaStudio SDK directory does not match the exact pinned 11-file inventory.")
+for relative_path, expected in expected_files.items():
+    actual = hashlib.sha256((sdk_dir / relative_path).read_bytes()).hexdigest()
+    if actual != expected:
+        raise SystemExit(f"MetaStudio SDK asset is missing or modified: {relative_path}")
+
+for index, raw_path in enumerate(sys.argv[4:]):
+    path = Path(raw_path)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise SystemExit("MetaStudio secret cannot be read.") from exc
+    if len(raw) > 4096:
+        raise SystemExit("MetaStudio secret exceeds the safe size limit.")
+    value = raw.rstrip(b"\r\n")
+    if not value or b"\r" in value or b"\n" in value or b"\x00" in value:
+        raise SystemExit("MetaStudio secrets must be non-empty single-line files.")
+    if index == 0 and not re.fullmatch(rb"[0-9a-f]{32}", value):
+        raise SystemExit("MetaStudio App Key must be exactly 32 lowercase hexadecimal characters.")
+PY
 }
 
 utc_stamp() {
@@ -166,15 +325,12 @@ require_public_cutover_ready() {
         die "IP Nginx cutover marker belongs to another IPv4 endpoint."
 }
 
-require_current_release_images() {
-    local release_tag snapshot current temporary
+require_release_images() {
+    local release_tag="$1" snapshot="$2" temporary
     require_command docker
     require_command python3
-    [ -s "${STATE_DIR}/current-release" ] || die "Current release marker is missing."
-    release_tag="$(<"${STATE_DIR}/current-release")"
     validate_release_tag "$release_tag"
-    snapshot="${RELEASES_DIR}/${release_tag}/images.json"
-    [ -s "$snapshot" ] && [ ! -L "$snapshot" ] || die "Current release image snapshot is missing or unsafe."
+    [ -s "$snapshot" ] && [ ! -L "$snapshot" ] || die "Release image snapshot is missing or unsafe: ${release_tag}"
     temporary="$(mktemp "${STATE_DIR}/.running-images.XXXXXX")"
     cloud_compose images --format json >"$temporary"
     if ! python3 - "$snapshot" "$temporary" "$release_tag" <<'PY'
@@ -209,17 +365,48 @@ def normalized(path: str) -> dict[str, tuple[str, str, str]]:
 
 expected = normalized(sys.argv[1])
 running = normalized(sys.argv[2])
-if expected != running:
+if set(expected) != set(running):
     raise SystemExit(1)
+application_repositories = {
+    "smart-gov/api",
+    "smart-gov/mcp-server",
+    "smart-gov/mock-gov-api",
+}
+for name, expected_value in expected.items():
+    running_value = running[name]
+    expected_id, expected_repository, expected_tag = expected_value
+    running_id, running_repository, running_tag = running_value
+    if expected_id != running_id or expected_repository != running_repository:
+        raise SystemExit(1)
+    if running_repository in application_repositories:
+        # Historical releases may predate uniform release aliases.  The image
+        # ID is immutable; accept either the recorded tag or the verified
+        # release alias that rollback creates for that exact ID.
+        if running_tag not in {expected_tag, sys.argv[3]}:
+            raise SystemExit(1)
+    elif expected_tag != running_tag:
+        raise SystemExit(1)
+for repository in application_repositories:
+    if sum(1 for value in running.values() if value[1] == repository) != 1:
+        raise SystemExit(1)
 api = [value for value in running.values() if value[1] == "smart-gov/api"]
 if len(api) != 1 or api[0][2] != sys.argv[3]:
     raise SystemExit(1)
 PY
     then
         rm -f "$temporary"
-        die "Running container image IDs/tags differ from the immutable current-release snapshot."
+        die "Running container image IDs/tags differ from the immutable release snapshot: ${release_tag}"
     fi
     rm -f "$temporary"
+}
+
+require_current_release_images() {
+    local release_tag snapshot
+    [ -s "${STATE_DIR}/current-release" ] || die "Current release marker is missing."
+    release_tag="$(<"${STATE_DIR}/current-release")"
+    validate_release_tag "$release_tag"
+    snapshot="${RELEASES_DIR}/${release_tag}/images.json"
+    require_release_images "$release_tag" "$snapshot"
 }
 
 required_secret_names() {
@@ -239,6 +426,12 @@ required_secret_names() {
         demo_staff_password \
         deepseek_api_key \
         dashscope_api_key
+    if metastudio_enabled; then
+        printf '%s\n' \
+            metastudio_app_key \
+            metastudio_huawei_access_key \
+            metastudio_huawei_secret_key
+    fi
 }
 
 require_secrets() {

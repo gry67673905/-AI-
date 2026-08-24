@@ -62,6 +62,9 @@ class ChatCommand:
     session_id: UUID | None = None
     service_id: UUID | None = None
     application_id: UUID | None = None
+    # Sanitized alternating question/answer messages supplied by trusted
+    # channel adapters. Retrieval and cache keys continue to use ``message``.
+    conversation_history: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

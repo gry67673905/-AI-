@@ -4,6 +4,7 @@ import math
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
+from uuid import UUID
 
 from app.domain.entities import EligibilityResult, MaterialRequirement
 from app.domain.enums import (
@@ -513,3 +514,111 @@ class DeliveryStateMachine:
     def require(self, current: DeliveryStatus, target: DeliveryStatus) -> None:
         if target not in self._allowed[current]:
             raise DomainRuleViolation(f"邮寄状态不能从 {current} 变更为 {target}")
+
+
+@dataclass(frozen=True, slots=True)
+class DigitalHumanIntentProposal:
+    intent_type: str
+    label: str
+    section: str
+    prefill: dict[str, Any]
+
+
+class DigitalHumanIntentPolicy:
+    """Map natural-language requests to a closed set of workbench sections.
+
+    This policy never emits an URL, HTTP method, native class name or mutation
+    command.  It only proposes navigation; the existing role-aware workbench
+    remains responsible for confirmation and subsequent strongly typed calls.
+    """
+
+    _role_routes: dict[Role, tuple[tuple[tuple[str, ...], str, str], ...]] = {
+        Role.CITIZEN: (
+            (("办件", "申请", "草稿", "提交", "补正", "补齐", "上传材料", "撤回", "进度", "邮寄", "配送", "缴费", "缴付", "支付", "预约", "人脸", "核验"), "applications", "前往我的办件确认操作"),
+            (("事项", "材料", "流程", "窗口", "资格"), "services", "前往事项服务"),
+            (("转人工", "人工咨询", "反馈", "评分", "咨询"), "consultation", "前往咨询工作台"),
+            (("账号", "个人资料", "退出"), "profile", "前往账号页面"),
+        ),
+        Role.STAFF: (
+            (("人工咨询", "人工回复", "咨询工单"), "staff_handoffs", "前往人工咨询工作台"),
+            (("待办", "认领", "审核", "补正", "驳回", "批准", "完成"), "staff_tasks", "前往审核待办确认操作"),
+            (("账号", "个人资料", "退出"), "profile", "前往账号页面"),
+        ),
+        Role.ADMIN: (
+            (("知识", "RAG", "索引", "重试", "归档", "取代"), "admin_knowledge", "前往知识资料管理"),
+            (("审计", "日志"), "admin_audit", "前往审计页面"),
+            (("部门", "窗口", "人员", "工作人员", "冻结", "解冻", "账号"), "admin_people", "前往人员与组织管理"),
+            (("事项", "版本", "发布", "暂停", "恢复", "终止"), "admin_catalog", "前往事项管理确认操作"),
+            (("统计", "指标", "概览"), "admin_overview", "前往运营概览"),
+            (("个人资料", "退出"), "profile", "前往账号页面"),
+        ),
+    }
+    _anonymous_routes: tuple[tuple[tuple[str, ...], str, str], ...] = (
+        (("登录", "注册", "账号"), "login", "前往登录或注册"),
+        (("事项", "材料", "流程", "窗口", "资格"), "services", "前往事项服务"),
+        (("咨询",), "consultation", "前往咨询页面"),
+    )
+    _authenticated_terms = (
+        "办件", "申请", "补正", "撤回", "进度", "邮寄", "缴费", "支付",
+        "预约", "人脸", "核验", "审核", "认领", "驳回", "批准", "完成", "审计",
+        "冻结", "解冻", "发布", "暂停", "恢复", "终止", "知识", "索引", "归档",
+    )
+
+    def propose(
+        self,
+        question: str,
+        role: Role | None,
+        suggested_actions: list[dict[str, Any]],
+    ) -> DigitalHumanIntentProposal | None:
+        if role is None and any(
+            term.lower() in question.lower() for term in self._authenticated_terms
+        ):
+            return DigitalHumanIntentProposal(
+                intent_type="AUTH_REQUIRED",
+                label="登录后继续办理",
+                section="login",
+                prefill={},
+            )
+        routes = self._anonymous_routes if role is None else self._role_routes[role]
+        for terms, section, label in routes:
+            if any(term.lower() in question.lower() for term in terms):
+                return DigitalHumanIntentProposal(
+                    intent_type=(
+                        {
+                            "login": "OPEN_LOGIN",
+                            "services": "OPEN_SERVICES",
+                            "consultation": "OPEN_CONSULTATION",
+                        }[section]
+                        if role is None
+                        else "NAVIGATE"
+                    ),
+                    label=label,
+                    section=section,
+                    prefill=self._safe_prefill(section, suggested_actions),
+                )
+
+        # A grounded, unambiguous service match is itself a useful typed
+        # navigation intent even when the utterance contains no generic word
+        # such as “事项”.
+        if suggested_actions and role in {None, Role.CITIZEN}:
+            first = suggested_actions[0]
+            if first.get("type") == "VIEW_SERVICE":
+                return DigitalHumanIntentProposal(
+                    intent_type="VIEW_SERVICE",
+                    label=str(first.get("label") or "查看事项")[:80],
+                    section="services",
+                    prefill=self._safe_prefill("services", suggested_actions),
+                )
+        return None
+
+    @staticmethod
+    def _safe_prefill(
+        section: str, suggested_actions: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        if section != "services" or len(suggested_actions) != 1:
+            return {}
+        service_id = str(suggested_actions[0].get("service_id", ""))
+        try:
+            return {"service_id": str(UUID(service_id))}
+        except (ValueError, TypeError, AttributeError):
+            return {}

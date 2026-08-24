@@ -9,6 +9,8 @@ require_root
 require_command docker
 require_cloud_files
 require_secrets
+require_metastudio_config
+bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" --skip-http
 
 domain="${SMART_GOV_DOMAIN:-}"
 public_ipv4="${PUBLIC_IPV4:-}"
@@ -70,6 +72,9 @@ cloud_compose up -d --remove-orphans \
 release_dir="${RELEASES_DIR}/${release_tag}"
 mkdir -p "$release_dir"
 install -m 600 "$COMPOSE_FILE" "${release_dir}/compose.cloud.yaml"
+if metastudio_enabled; then
+    install -m 600 "$METASTUDIO_COMPOSE_FILE" "${release_dir}/compose.metastudio.yaml"
+fi
 install -m 600 "$CLOUD_ENV_FILE" "${release_dir}/cloud.env"
 cloud_compose images --format json >"${release_dir}/images.json"
 chmod 600 "${release_dir}/images.json"

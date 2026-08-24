@@ -80,5 +80,81 @@ if [ ! -s "$dashscope_destination" ]; then
 fi
 chmod 400 "$dashscope_destination"
 
+install_required_external_secret() {
+    local secret_name="$1" source_variable="$2" prompt="$3"
+    local destination="${SECRETS_DIR}/${secret_name}" source_path value
+    [ ! -s "$destination" ] || {
+        chmod 400 "$destination"
+        return
+    }
+    if [[ -v "$source_variable" ]]; then
+        source_path="${!source_variable}"
+    else
+        source_path=""
+    fi
+    if [ -n "$source_path" ]; then
+        [ -s "$source_path" ] || die "${source_variable} is missing or empty."
+        [ ! -L "$source_path" ] || die "${source_variable} must not reference a symbolic link."
+        install -m 400 "$source_path" "$destination"
+    elif [ -t 0 ]; then
+        read -r -s -p "$prompt (input hidden): " value
+        printf '\n'
+        [ -n "$value" ] || die "${secret_name} must not be empty."
+        [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
+            die "${secret_name} must be a single line."
+        printf '%s' "$value" >"$destination"
+        unset value
+    else
+        die "Provide ${source_variable} or run interactively before enabling MetaStudio."
+    fi
+    chmod 400 "$destination"
+}
+
+ensure_metastudio_app_identity() {
+    local app_id
+    app_id="$(cloud_env_value METASTUDIO_APP_ID)"
+    case "$app_id" in
+        ""|CONFIGURE_BEFORE_ENABLE|GENERATE_ON_ENABLE)
+            set_cloud_env_value METASTUDIO_APP_ID "$(random_hex 16)"
+            log "Generated the non-secret 32-hex MetaStudio APPID in deploy/cloud.env."
+            ;;
+        *)
+            [[ "$app_id" =~ ^[0-9a-f]{32}$ ]] ||
+                die "METASTUDIO_APP_ID must be exactly 32 lowercase hexadecimal characters."
+            ;;
+    esac
+}
+
+install_or_generate_metastudio_app_key() {
+    local destination="${SECRETS_DIR}/metastudio_app_key" source_path=""
+    if [ ! -s "$destination" ]; then
+        if [ -n "${METASTUDIO_APP_KEY_FILE:-}" ]; then
+            source_path="$METASTUDIO_APP_KEY_FILE"
+            [ -s "$source_path" ] || die "METASTUDIO_APP_KEY_FILE is missing or empty."
+            [ ! -L "$source_path" ] || die "METASTUDIO_APP_KEY_FILE must not reference a symbolic link."
+            install -m 400 "$source_path" "$destination"
+        else
+            # The App Key is a project-owned HMAC secret, not a Huawei IAM
+            # credential. Generate the locked 128-bit/32-hex value locally and
+            # never print it; an administrator copies it to the MetaStudio
+            # console through the documented root-only workflow.
+            printf '%s' "$(random_hex 16)" >"$destination"
+        fi
+    fi
+    chmod 400 "$destination"
+}
+
+if metastudio_enabled; then
+    ensure_metastudio_app_identity
+    install_or_generate_metastudio_app_key
+    install_required_external_secret \
+        metastudio_huawei_access_key METASTUDIO_HUAWEI_ACCESS_KEY_FILE \
+        "Huawei Cloud IAM access key"
+    install_required_external_secret \
+        metastudio_huawei_secret_key METASTUDIO_HUAWEI_SECRET_KEY_FILE \
+        "Huawei Cloud IAM secret key"
+fi
+
+require_metastudio_config
 require_secrets
 log "Cloud Docker secrets are ready; no secret value was displayed."

@@ -1,4 +1,4 @@
-# 云端演示部署与 APK 交付
+# 云端演示部署、MetaStudio 与 APK 交付
 
 本文描述 `compose.cloud.yaml` 与 `deploy/` 的实际 IP-only 部署顺序。目标是单机 Linux x86_64 演示服务器，当前公网入口固定为 `https://123.249.68.176`。API 只监听 `127.0.0.1:18000`，所有事项、账号、材料、支付和办理结果仍是合成演示数据。
 
@@ -7,7 +7,7 @@
 - 至少 8 GiB 内存、20 GiB 可用磁盘，Docker Engine 与 Compose v2 可用。
 - 安全组和主机防火墙必须持续允许 TCP 80、443。80 不是一次性端口：Let’s Encrypt `shortlived` IP 证书依赖 HTTP-01 无停机续期。
 - 外部只暴露 Nginx 的 80/443；API 固定为回环地址 `127.0.0.1:18000`，PostgreSQL、Redis、Milvus、MinIO、MCP 和 Mock API 不映射公网端口。
-- DeepSeek、DashScope 和内部凭据只放在 root 所有的文件或 Docker secrets 中，绝不写入命令行、日志、APK 或 Git。
+- DeepSeek、DashScope、MetaStudio App Key、华为云 IAM AK/SK 和内部凭据只放在 root 所有的文件或 Docker secrets 中，绝不写入命令行、日志、APK 或 Git。
 - 云端只上传 `artifacts/rag/group-rag-sanitized-v1.zip`；禁止上传含废弃凭据和非业务文件的原始 RAG ZIP。
 
 ## 1. 预检、Docker 与 secrets
@@ -51,13 +51,35 @@ sudo deploy/scripts/deploy.sh \
 sudo deploy/scripts/health-check.sh --expect-rag disabled
 ```
 
-此时 readiness 必须恰好为 7 项，迁移必须到 `0005_rag_corpus`。确认一次性 embedding 费用后才运行：
+此时 readiness 必须恰好为 7 项，迁移必须到当前 head `0006_metastudio`；MetaStudio 保持关闭不会触发供应方调用。确认一次性 embedding 费用后才运行：
 
 ```bash
 sudo deploy/scripts/import-rag.sh --confirm-paid-import
 ```
 
 导入器先做 ZIP dry-run，再使用 PostgreSQL 检查点和 embedding cache 续传。完整成功后才切换 Milvus alias、原子持久化 `RAG_GROUP_ENABLED=true` 并重建 API。最终 readiness 必须恰好为 8 项，`rag_corpus` 核对 `team-2026-08-22-v1`、15,858 条正文和 1,012 条路由。
+
+## 2.1 可选 MetaStudio 智能交互
+
+基础云栈始终从 `METASTUDIO_ENABLED=false` 开始，MetaStudio 与团队 RAG 的开关互不替代。需要数字人交互时，先按 [MetaStudio 接入说明](metastudio-integration.md) 放入经供应方校验的 Web SDK 5.0.6 完整资产，填写北京四的 App/Project/robotId 和精确 HTTPS 回调，再导入三项额外 secret。启用状态下 `cloud_compose` 自动合并 `compose.metastudio.yaml`。
+
+部署前零网络静态检查：
+
+```bash
+sudo bash deploy/scripts/verify-metastudio-smoke.sh --skip-http
+```
+
+缺少 SDK 固定 ZIP/CMS 证据、精确 11 项资产/integrity、真实 robotId、App/Project、IAM AK/SK、App Key，使用占位值，使用非北京四 endpoint，或把密钥直接写入 `cloud.env`，`deploy.sh` 都会在构建和容器变更前失败。SIS 只在 MetaStudio 控制台选择并授权委托，后端不配置或直连 SIS。默认关闭时不会要求这些专有资产或凭据。
+
+Nginx 只为 `POST /api/v1/integrations/metastudio/llm` 配置精确回调 location；请求体 `is_stream=true` 时仍使用同一路径返回 SSE。该 location 设置 `proxy_buffering off`，专用日志仅记录规范化 `$uri`，不会记录含 MSS_A `secret/time_stamp` 的 query 或完整请求行。切流后可运行以下零付费负向 smoke：
+
+```bash
+sudo bash deploy/scripts/verify-metastudio-smoke.sh \
+  --base-url https://123.249.68.176 \
+  --through-nginx
+```
+
+它只发送无凭据或合成错误凭据请求并验证 400/401/503 和日志脱敏，不申请 onceCode、不启动数字人、不调用 SIS/DeepSeek。MetaStudio 启用时刻意不请求 `client-sessions`；首次真实联调必须另行确认华为云计费、授权和隐私告知。
 
 ## 3. 官方 lego 与 IP 证书
 
@@ -126,7 +148,7 @@ sudo deploy/scripts/restore-legacy.sh \
   --confirm-restore
 ```
 
-只回滚 Nginx 使用 `rollback-ip-nginx.sh --confirm-rollback`。Compose 应用镜像回滚使用 `rollback.sh --release <已保留release>`；它不会 downgrade 数据库，也不会删除持久卷。
+只回滚 Nginx 使用 `rollback-ip-nginx.sh --confirm-rollback`。Compose 应用镜像回滚使用 `rollback.sh --release <已保留release>`；每个 release 会连同当时启用的 MetaStudio 覆盖文件和非密钥环境快照一起恢复。脚本把目标 compose/env 显式传入子健康检查；目标关闭 MetaStudio 时不会因当前版本缺少 MetaStudio secret 而阻塞。目标启动或健康检查失败时，会用原活动环境和原 release 镜像尽力恢复此前运行态并保留失败退出码。回滚不会 downgrade 数据库，也不会删除持久卷。
 
 ## 6. Android APK
 
@@ -140,3 +162,5 @@ D:\AndroidDev\gradle-8.14.5\bin\gradle.bat `
 ```
 
 debug APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。本项目只编译和运行 JVM/静态测试，不自动安装 APK、不启动 AVD、不做手机界面视觉调试。
+
+若构建 MetaStudio 版本，Android 构建还会核对 `assets/metastudio/sdk/` 内的官方 5.0.6 固定 ZIP/CMS 证据、完整 11 项相对资产和 `sdk-integrity.json`。`serverAddress`、robotId 与一次性 onceCode 只能由 `/api/v1/integrations/metastudio/client-sessions` 返回，禁止写入 BuildConfig、WebView 查询串或静态资产。启用数字人意味着华为 SDK 可能把音频/交互直接发送到华为云，必须在界面中先取得用户明确同意；Android 10 与 Android 12+ 真机 PoC 未通过前不得发布数字人 APK。

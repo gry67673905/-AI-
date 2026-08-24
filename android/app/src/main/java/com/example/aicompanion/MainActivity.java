@@ -1,14 +1,22 @@
 package com.example.aicompanion;
 
 import android.content.pm.PackageManager;
+import android.content.Intent;
 import android.os.Bundle;
 import android.webkit.WebView;
+import android.widget.Button;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.lifecycle.ViewModelProvider;
 
 import com.example.aicompanion.core.HmsCoreHelper;
+import com.example.aicompanion.metastudio.boundary.DigitalHumanWebViewHost;
+import com.example.aicompanion.metastudio.business.DigitalHumanActionPolicy;
+import com.example.aicompanion.metastudio.business.DigitalHumanAvailability;
+import com.example.aicompanion.metastudio.model.DigitalHumanContract.NavigationIntent;
 import com.example.aicompanion.portal.PortalGraph;
 import com.example.aicompanion.portal.boundary.DocumentPickerBoundary;
 import com.example.aicompanion.portal.boundary.PortalJsBoundary;
@@ -24,11 +32,17 @@ import com.example.aicompanion.web.SecureAssetWebViewClient;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /** Thin lifecycle host. Business decisions and HTTP calls live outside the Activity. */
 public final class MainActivity extends AppCompatActivity implements PortalJsBoundary.Host {
     private final Gson gson = new Gson();
     private final RoleNavigationPolicy navigationPolicy = new RoleNavigationPolicy();
+    private final DigitalHumanActionPolicy digitalHumanActionPolicy = new DigitalHumanActionPolicy();
+    private final ActivityResultLauncher<Intent> digitalHumanLauncher = registerForActivityResult(
+        new ActivityResultContracts.StartActivityForResult(),
+        result -> onDigitalHumanResult(result.getResultCode(), result.getData())
+    );
 
     private WebView portalWebView;
     private PortalCoordinatorViewModel viewModel;
@@ -52,9 +66,58 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
         windowMap = new WindowMapBoundary(this, graph.catalogGateway(), this::dispatchBoundaryError);
 
         portalWebView = findViewById(R.id.assistantWebView);
+        configureDigitalHumanLaunch(findViewById(R.id.openDigitalHuman));
         SecureWebViewHost.configure(this, portalWebView, new PortalJsBoundary(this), this::onPageReady);
         viewModel.state().observe(this, this::onUiState);
         portalWebView.loadUrl(SecureAssetWebViewClient.START_URL);
+    }
+
+    private void configureDigitalHumanLaunch(Button button) {
+        DigitalHumanAvailability.Decision availability = new DigitalHumanAvailability().check(this);
+        boolean enabled = availability.isAvailable() && DigitalHumanWebViewHost.isMessagingSupported();
+        // Keep the control actionable so unsupported devices receive a visible
+        // explanation instead of a silently disabled button.
+        button.setEnabled(true);
+        button.setText(enabled ? R.string.digital_human_open : R.string.digital_human_unsupported);
+        button.setContentDescription(enabled
+            ? "打开华为云智能交互数字人"
+            : availability.getMessage());
+        button.setOnClickListener(view -> {
+            if (!enabled) {
+                dispatchBoundaryError("digital_human_unavailable", availability.getMessage());
+                return;
+            }
+            // MetaStudio/SIS exclusively owns the microphone and remote speech
+            // while its isolated Activity is active. Tear down any ordinary
+            // portal recognizer and stop local TTS before opening it; install a
+            // fresh, idle boundary so normal chat remains available on return.
+            if (voiceCapture != null) voiceCapture.destroy();
+            voiceCapture = new VoiceCaptureBoundary(this, voiceListener());
+            if (speechOutput != null) speechOutput.stop();
+            digitalHumanLauncher.launch(new Intent(this, DigitalHumanActivity.class));
+        });
+    }
+
+    private void onDigitalHumanResult(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null) return;
+        String raw = data.getStringExtra(DigitalHumanActivity.EXTRA_NAVIGATION_JSON);
+        if (raw == null || raw.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 16 * 1024) {
+            dispatchBoundaryError("invalid_digital_human_result", "数字人操作建议无效");
+            return;
+        }
+        try {
+            DigitalHumanActionPolicy.Decision decision = digitalHumanActionPolicy.validatePortalEvent(
+                JsonParser.parseString(raw), viewModel.currentRole()
+            );
+            if (!decision.isAllowed()) {
+                dispatchBoundaryError(decision.getCode(), decision.getMessage());
+                return;
+            }
+            NavigationIntent intent = decision.getIntent();
+            dispatch("onNativeAux", intent.toPortalEvent());
+        } catch (RuntimeException invalid) {
+            dispatchBoundaryError("invalid_digital_human_result", "数字人操作建议格式无效");
+        }
     }
 
     @Override

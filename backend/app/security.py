@@ -21,8 +21,18 @@ _SENSITIVE_KEYS = re.compile(
 )
 _BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
 _API_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
-_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-_CN_ID = re.compile(r"(?<![0-9A-Za-z])\d{17}[0-9Xx](?![0-9A-Za-z])")
+_CN_DIGIT = "0-9零〇一二三四五六七八九幺两"
+_ASR_SEPARATOR = r"[\s,./-]*"
+_PHONE = re.compile(
+    rf"(?<![{_CN_DIGIT}])(?:1|一|幺){_ASR_SEPARATOR}"
+    rf"(?:[3-9]|[三四五六七八九])"
+    rf"(?:{_ASR_SEPARATOR}[{_CN_DIGIT}]){{9}}(?![{_CN_DIGIT}])"
+)
+_CN_ID = re.compile(
+    rf"(?<![0-9A-Za-z零〇一二三四五六七八九幺两])"
+    rf"(?:[{_CN_DIGIT}]{_ASR_SEPARATOR}){{17}}(?:[{_CN_DIGIT}Xx])"
+    rf"(?![0-9A-Za-z零〇一二三四五六七八九幺两])"
+)
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w.-])")
 
 

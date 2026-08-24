@@ -10,6 +10,7 @@ from app.domain.enums import (
     AppointmentStatus,
     ApplicationStatus,
     DeliveryStatus,
+    DigitalHumanIntentStatus,
     HandoffStatus,
     KnowledgeStatus,
     PaymentStatus,
@@ -344,3 +345,25 @@ class BusinessAuditEvent:
     resource_id: str
     detail: dict[str, Any]
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DigitalHumanActionIntent:
+    """A short-lived proposal that can only navigate to a typed workbench.
+
+    The entity deliberately contains no arbitrary URL, HTTP method or executable
+    command.  A normal authenticated API call still performs every mutation.
+    """
+
+    id: UUID
+    owner_account_id: UUID | None
+    owner_role: Role | None
+    client_session_id: UUID
+    chat_id_hash: str
+    intent_type: str
+    label: str
+    section: str
+    prefill: dict[str, Any]
+    status: DigitalHumanIntentStatus
+    expires_at: datetime
+    consumed_at: datetime | None = None

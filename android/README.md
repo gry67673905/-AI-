@@ -10,18 +10,24 @@
 2. 如需 HMS 地图能力，在 `app/agconnect-services.json` 放置本机 AG Connect 配置。该文件已忽略提交。
 3. 执行 `./gradlew testDebugUnitTest assembleDebug`（Windows 使用 `gradlew.bat`）。
 
-Debug 默认后端为 `http://10.0.2.2:8000`。可以在构建时覆盖，例如：
+Debug 默认后端为当前云端 HTTPS 入口 `https://123.249.68.176`。可以在构建时显式覆盖，例如：
 
 ```powershell
 .\gradlew.bat assembleDebug -PgovApiBase=https://123.249.68.176
 ```
 
-仅在本地全栈已启动且明确希望执行真实请求时运行可选测试：
+仅在明确希望执行真实只读请求时运行可选云端测试：
 
 ```powershell
 .\gradlew.bat testDebugUnitTest `
   -DliveBackendTest=true `
-  -DliveBackendUrl=http://127.0.0.1:8000
+  -DliveBackendUrl=https://123.249.68.176
 ```
+
+MetaStudio 数字人使用独立 `:digital_human` 进程和隔离 WebView；不会放宽群众门户 WebView，也不会把
+JWT、华为 AK/SK 或 APPKEY 注入页面。发布前必须按
+[`docs/metastudio-integration.md`](../docs/metastudio-integration.md) 在 Android 10 与 Android 12+
+真机完成 System WebView、WebRTC、麦克风、SIS、流式回答和 `extendParam` PoC。PoC 未通过时可以生成
+调试候选 APK，但不得发布数字人版本。
 
 该模块不包含模拟器启动、APK 安装或手机端视觉回归步骤。

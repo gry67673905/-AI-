@@ -209,6 +209,10 @@ services:
     user: "0:0"
     environment:
       ENVIRONMENT: demo
+      # Vendor integration is opt-in through compose.metastudio.yaml. Keeping
+      # the base stack explicitly disabled guarantees a structured 503 instead
+      # of an accidental provider call when SDK/IAM/robot configuration is absent.
+      METASTUDIO_ENABLED: "false"
       POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
       POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
       REDIS_HOST: redis

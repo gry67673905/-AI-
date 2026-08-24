@@ -36,6 +36,56 @@ def escapedGovApiBase = configuredGovApiBase
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
 
+def metaStudioSdkVersion = "5.0.6"
+def metaStudioArchiveSha256 = "d8d028588b35580856d8cc1fc35b67b50fbc8f99525c45ea5d990feec86c7641"
+def metaStudioCmsSha256 = "2bae230d3585e753adec0f001b81eb080f66c1a9cd2b99dea59c1f2827bbf0ea"
+def metaStudioSdkFiles = [
+    "HwICSUiSdk.css": "da0cf9bd498ae2ab929a498f61c7a2c5aa025c73eb9a4bee7205e2a2f6752411",
+    "HwICSUiSdk.d.ts": "ac217d3b81707a0afe912c9dfd8e0324b5518252d9cb1c0a4c007949a4fe82ec",
+    "HwICSUiSdk.esm.js": "cc76cfe04fad8cbfd5d8136a397ed5d524e753e803ee459ea99e85a6c7d7d9e2",
+    "HwICSUiSdk.js": "3e481679f7a556c90c83e7646315c09c74a16164c92a33404ba269b17aa0b17f",
+    "images/aiChatImg.png": "d0103b231e6eddb728e850df06243eb49efdb62bc95a90f0cbbe28a90650b1b7",
+    "images/bg_mobile.png": "c93137284a011cee4c271a9344b9ea3866b7abe71d5337308d557afde490c48e",
+    "images/bg.png": "e2ae567b7f4935e1eebe2f7dbede67f45820f8a5a3118c402bf568f32ecf5477",
+    "modelData.js": "775cf9362fc3c98fcbc6fda571f8341c636347a9287b85cadd6b92589fd70970",
+    "package.json": "2eb945ddeec3be3a9726da64cf774b65e96f1630a78c429fac0b921f6cf4ebf3",
+    "provenance/HwICSUiSdk-5.0.6.zip.cms": metaStudioCmsSha256,
+    "wasmData.js": "18620018c309eb0f601f4137e2a39a136ce3fedd6259232f457b2d704e4203d9"
+]
+def metaStudioSdkDir = file("src/main/assets/metastudio/sdk")
+def metaStudioSdkIntegrity = new File(metaStudioSdkDir, "sdk-integrity.json")
+def sha256 = { File input ->
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    input.withInputStream { stream ->
+        byte[] buffer = new byte[8192]
+        int count
+        while ((count = stream.read(buffer)) != -1) digest.update(buffer, 0, count)
+    }
+    digest.digest().collect { String.format("%02x", it & 0xff) }.join()
+}
+if (!metaStudioSdkIntegrity.isFile()) {
+    throw new GradleException("MetaStudio SDK 5.0.6 integrity marker is required")
+}
+def integrity = new JsonSlurper().parse(metaStudioSdkIntegrity)
+def declaredFiles = integrity.files instanceof Map ? integrity.files : [:]
+def markerValid = integrity.version == metaStudioSdkVersion
+    && integrity.cms_verified == true
+    && integrity.archive_sha256 == metaStudioArchiveSha256
+    && integrity.cms_sha256 == metaStudioCmsSha256
+    && declaredFiles.size() == metaStudioSdkFiles.size()
+if (!markerValid) {
+    throw new GradleException("MetaStudio SDK 5.0.6 CMS/integrity marker is invalid")
+}
+metaStudioSdkFiles.each { relativePath, expectedHash ->
+    File asset = new File(metaStudioSdkDir, relativePath)
+    if (!asset.isFile()
+        || declaredFiles[relativePath] != expectedHash
+        || sha256(asset) != expectedHash) {
+        throw new GradleException("MetaStudio SDK 5.0.6 asset is missing or modified: ${relativePath}")
+    }
+}
+def metaStudioSdkReady = true
+
 android {
     namespace "com.example.aicompanion"
     compileSdk 35
@@ -59,6 +109,9 @@ android {
         versionName "0.2.0-cloud-demo"
 
         buildConfigField "String", "HMS_MAP_API_KEY", "\"${hmsMapApiKey}\""
+        buildConfigField "String", "METASTUDIO_SDK_VERSION", "\"${metaStudioSdkVersion}\""
+        buildConfigField "String", "METASTUDIO_SDK_ARCHIVE_SHA256", "\"${metaStudioArchiveSha256}\""
+        buildConfigField "boolean", "METASTUDIO_SDK_READY", "${metaStudioSdkReady}"
     }
 
     buildTypes {

@@ -1,0 +1,6 @@
+# Generated cloud configuration and all credential/runtime material.
+cloud.env
+secrets/
+state/
+releases/
+backups/

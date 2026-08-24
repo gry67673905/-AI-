@@ -9,6 +9,7 @@ require_root
 require_command nginx
 require_command curl
 require_cloud_files
+bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" --skip-http
 require_rag_cutover_ready
 require_cutover_smoke_ready
 

@@ -43,6 +43,9 @@ public final class TextToSpeechBoundary implements TextToSpeech.OnInitListener {
         engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "gov-assistant-answer");
     }
 
-    public void stop() { if (!destroyed) engine.stop(); }
+    public void stop() {
+        pendingText = "";
+        if (!destroyed) engine.stop();
+    }
     public void destroy() { destroyed = true; engine.stop(); engine.shutdown(); ready = false; pendingText = ""; }
 }

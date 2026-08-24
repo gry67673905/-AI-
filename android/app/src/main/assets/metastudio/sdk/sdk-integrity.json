@@ -1,0 +1,21 @@
+{
+  "version": "5.0.6",
+  "cms_verified": true,
+  "archive_sha256": "d8d028588b35580856d8cc1fc35b67b50fbc8f99525c45ea5d990feec86c7641",
+  "cms_sha256": "2bae230d3585e753adec0f001b81eb080f66c1a9cd2b99dea59c1f2827bbf0ea",
+  "signer_thumbprint": "ad39bc7c7a3d6bc0df3e91d53c023aabecc62b64",
+  "verification_note": "Detached CMS signature verified; signer chain anchored to the official Huawei root; current Huawei root and Code Signing CA 2 CRLs were inspected.",
+  "files": {
+    "HwICSUiSdk.css": "da0cf9bd498ae2ab929a498f61c7a2c5aa025c73eb9a4bee7205e2a2f6752411",
+    "HwICSUiSdk.d.ts": "ac217d3b81707a0afe912c9dfd8e0324b5518252d9cb1c0a4c007949a4fe82ec",
+    "HwICSUiSdk.esm.js": "cc76cfe04fad8cbfd5d8136a397ed5d524e753e803ee459ea99e85a6c7d7d9e2",
+    "HwICSUiSdk.js": "3e481679f7a556c90c83e7646315c09c74a16164c92a33404ba269b17aa0b17f",
+    "images/aiChatImg.png": "d0103b231e6eddb728e850df06243eb49efdb62bc95a90f0cbbe28a90650b1b7",
+    "images/bg_mobile.png": "c93137284a011cee4c271a9344b9ea3866b7abe71d5337308d557afde490c48e",
+    "images/bg.png": "e2ae567b7f4935e1eebe2f7dbede67f45820f8a5a3118c402bf568f32ecf5477",
+    "modelData.js": "775cf9362fc3c98fcbc6fda571f8341c636347a9287b85cadd6b92589fd70970",
+    "package.json": "2eb945ddeec3be3a9726da64cf774b65e96f1630a78c429fac0b921f6cf4ebf3",
+    "provenance/HwICSUiSdk-5.0.6.zip.cms": "2bae230d3585e753adec0f001b81eb080f66c1a9cd2b99dea59c1f2827bbf0ea",
+    "wasmData.js": "18620018c309eb0f601f4137e2a39a136ce3fedd6259232f457b2d704e4203d9"
+  }
+}

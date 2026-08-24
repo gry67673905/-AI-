@@ -14,6 +14,7 @@ require_command sha256sum
 require_command systemctl
 require_command timeout
 require_cloud_files
+bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" --skip-http
 
 public_ipv4="${PUBLIC_IPV4:-}"
 confirm_cutover=false

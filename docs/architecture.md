@@ -35,6 +35,7 @@ flowchart LR
     MCP[Node MCP Server\n/mcp + /health]
     Mock[模拟政务 REST API\n六个公开事项]
     LLM[DeepSeek deepseek-chat]
+    MetaStudio[华为云 MetaStudio\n可选·北京四]
     etcd[(etcd)]
 
     Native -->|HTTP / SSE| UV
@@ -45,6 +46,8 @@ flowchart LR
     Adapters -->|内部 Bearer| MCP
     MCP -->|独立 Bearer| Mock
     Adapters -->|LangChain ChatDeepSeek| LLM
+    Native -.用户显式选择数字人.-> MetaStudio
+    MetaStudio -.MSS_A /llm JSON或SSE.-> UV
     Milvus --> etcd
     Milvus --> MinIO
 ```
@@ -87,6 +90,12 @@ flowchart LR
 7. `/chat/stream` 固定输出 `meta`、`delta`、`done` 或 `error` SSE 事件；Android 最终使用 `TextToSpeech` 播报，原始音频不上传。
 
 若问题绑定 `application_id`，必须登录并经过授权查询；后端直接返回受控的办件状态描述，不将私人办件上下文发送给 Redis、MCP、Milvus 或 LLM。
+
+### 可选 MetaStudio 数字人交互
+
+MetaStudio 默认关闭。Android 通过受控原生网关向 `/api/v1/integrations/metastudio/client-sessions` 获取短期 onceCode、北京四 serverAddress 和 robotId，再把白名单字段交给本地官方 SDK 包装页；AK/SK 和 App Key 永不进入 APK/WebView。MetaStudio 只回调 `POST /api/v1/integrations/metastudio/llm`，请求体 `is_stream` 决定普通 JSON 或同路径 SSE。边界先验证 MSS_A HMAC、300 秒时间窗和重放，再调用现有咨询协调者；模型结果不能直接执行办件动作。动作先形成短期 intent，Android 携带登录 Bearer 调用 `/action-intents/{id}/exchange` 后仍需经过原业务权限、幂等和状态机。
+
+Nginx 对唯一回调路径关闭代理缓冲。由于 MSS_A 的 `secret/time_stamp` 位于 query，专用 access log 只记录规范化 `$uri`，不记录 `$args`、`$query_string`、`$request` 或 `$request_uri`；该 location 还关闭可能复制完整请求行的 Nginx error log，云端 Uvicorn 原始 access log 同样关闭，应用层只记录脱敏错误码和 request ID。启用前云编排对 Web SDK 5.0.6 完整性、robotId、App/Project、北京四 endpoint 与文件化 IAM/App secrets 执行硬门禁。
 
 ### 办件与审核
 
@@ -143,6 +152,7 @@ JS 不能指定任意 URL、HTTP 方法、原生类名、坐标或外部链接�
 | 材料 | MinIO 私有 bucket + PostgreSQL 哈希元数据 | 不生成公共直链、不在 WebView 直接打开 |
 | 生物/支付/邮寄 | 仅状态与模拟引用 | 不采集生物数据、不发生真实资金/快递 |
 | 凭据 | 被忽略的 `.env`/容器环境 | 不进入 APK、API 响应或提交历史 |
+| MetaStudio 音频/交互 | 用户显式选择后由官方 SDK 与华为云处理 | 未告知/同意时不得启用；AK/SK、App Key、onceCode 不进入日志或 WebView 持久化 |
 
 JWT access token 默认 15 分钟，refresh token 默认 7 天且只保存哈希。冻结账号会递增 `token_version` 并撤销 refresh token，使已有令牌失效。工作人员只处理所属部门/窗口任务；管理员管理目录和人员，但不能代替工作人员审批。
 
@@ -157,12 +167,12 @@ JWT access token 默认 15 分钟，refresh token 默认 7 天且只保存哈希
 
 ## 数据迁移与回退边界
 
-迁移链为 `0001_initial → 0002_identity_catalog → 0003_applications_operations → 0004_knowledge_audit → 0005_rag_corpus`。旧匿名聊天保留，新 `owner_account_id` 可为空且不会自动归属后来注册的用户。`0005` 只新增 `knowledge_datasets`、`knowledge_corpus_chunks` 和 `knowledge_embedding_cache`，不覆盖管理员知识表。Milvus 保留 `gov_knowledge_v2`，团队语料使用带版本/归档哈希的 collection 和活动 alias；Redis 使用 `smart-gov:retrieval:v3:*`，dataset 版本使新旧检索结果天然隔离。
+迁移链为 `0001_initial → 0002_identity_catalog → 0003_applications_operations → 0004_knowledge_audit → 0005_rag_corpus → 0006_metastudio`。旧匿名聊天保留，新 `owner_account_id` 可为空且不会自动归属后来注册的用户。`0005` 只新增 `knowledge_datasets`、`knowledge_corpus_chunks` 和 `knowledge_embedding_cache`，不覆盖管理员知识表；`0006` 只新增带所有者、过期时间和消费状态的短期数字人动作意图表。Milvus 保留 `gov_knowledge_v2`，团队语料使用带版本/归档哈希的 collection 和活动 alias；Redis 使用 `smart-gov:retrieval:v3:*`，dataset 版本使新旧检索结果天然隔离。
 
 `scripts/migrate.ps1` 仅执行 `upgrade head` 和状态检查；普通 `dev-down.ps1` 保留命名卷。需要回退应用时应先做数据库/对象存储备份并制定兼容策略，不能用自动 downgrade 代替数据恢复。
 
 ## 云端演示拓扑
 
-`compose.cloud.yaml` 将 API 只绑定到服务器回环地址 `127.0.0.1:18000`；Nginx 使用官方 lego v5.4.0 通过 HTTP-01 管理 Let’s Encrypt `shortlived` IP 证书，对外提供 TLS 1.2/1.3、HTTP→HTTPS 重定向、SSE 关闭缓冲、请求体限制和接口限流。TCP 80 持续开放用于短证书无停机续期。Docker secrets 只读注入数据库、JWT、内部 Token、DeepSeek 与 DashScope 凭据。首次发布、团队 RAG 付费导入、一次付费聊天验收和 Nginx 流量切换分别需要显式确认，失败时不会自动停掉旧服务。
+`compose.cloud.yaml` 将 API 只绑定到服务器回环地址 `127.0.0.1:18000`；MetaStudio 开启时额外合并 `compose.metastudio.yaml`。Nginx 使用官方 lego v5.4.0 通过 HTTP-01 管理 Let’s Encrypt `shortlived` IP 证书，对外提供 TLS 1.2/1.3、HTTP→HTTPS 重定向、SSE 关闭缓冲、请求体限制和接口限流。TCP 80 持续开放用于短证书无停机续期。Docker secrets 只读注入数据库、JWT、内部 Token、DeepSeek、DashScope 以及可选 MetaStudio/IAM 凭据。首次发布、团队 RAG 付费导入、MetaStudio 真实会话、一次付费聊天验收和 Nginx 流量切换分别需要显式确认，失败时不会自动停掉旧服务。
 
 云端 Android APK 只能编译进无凭据、无路径的 HTTPS origin，且 debug/release 均拒绝明文流量。具体部署、回滚与 APK 构建步骤见 [云端部署手册](cloud-deployment.md)。该拓扑仍保留 Mock API 与 Demo Provider，不等同于正式政务上线；正式环境还需替换身份、租户、密钥、文件扫描及外部适配器并完成合规评估。
