@@ -21,9 +21,9 @@ public class CloudBuildConfigTest {
     private static final String CLOUD_API = "https://123.249.68.176";
 
     @Test
-    public void cloudDemoVersionAndApiOriginArePinned() {
-        assertEquals(2, BuildConfig.VERSION_CODE);
-        assertEquals("0.2.0-cloud-demo", BuildConfig.VERSION_NAME);
+    public void cloudDeviceTestVersionAndApiOriginArePinned() {
+        assertEquals(7, BuildConfig.VERSION_CODE);
+        assertEquals("0.3.0-material-docgen-test", BuildConfig.VERSION_NAME);
         assertEquals(CLOUD_API, BuildConfig.GOV_API_BASE);
         assertEquals("5.0.6", BuildConfig.METASTUDIO_SDK_VERSION);
         assertEquals(
@@ -58,6 +58,46 @@ public class CloudBuildConfigTest {
         assertTrue(source.contains("jobInfoChange"));
         assertTrue(source.contains("job.isReady === true"));
         assertFalse(source.contains("await window.HwICSUiSdk.create(launch);\n            launch.onceCode = '';\n            status('ready')"));
+    }
+
+    @Test
+    public void metaStudioWrapperObservesStreamingAsrWithoutForwardingTranscript() throws Exception {
+        Path wrapper = Paths.get("src", "main", "assets", "metastudio", "app.js");
+        String source = new String(Files.readAllBytes(wrapper), StandardCharsets.UTF_8);
+
+        assertTrue(source.contains("speechRecognized: (question) => observeSpeechRecognition(question)"));
+        assertTrue(source.contains("if (!conversationActive"));
+        assertTrue(source.contains("Number.isSafeInteger(resultId)"));
+        assertTrue(source.contains("typeof isLast !== 'boolean'"));
+        assertTrue(source.contains("typeof question.text !== 'string'"));
+        assertTrue(source.contains("status('asr_partial')"));
+        assertTrue(source.contains("status('asr_final')"));
+        assertTrue(source.contains("renderSpeechCaption(chatId, resultId, question.text, isLast)"));
+        assertTrue(source.contains("document.getElementById('local-caption-text').textContent = text"));
+        assertTrue(source.contains("interactionPhase === PHASE.ANSWERING"));
+        assertTrue(source.contains("status('ready')"));
+        assertTrue(source.contains("enableCaption: true"));
+        assertTrue(source.contains("enableCollectAudioDemand: false"));
+        assertTrue(source.contains("enableVadInterrupt: true"));
+        assertFalse(source.contains("MAX_RESULT_ID"));
+        assertFalse(source.contains("speechState.lastResultId"));
+        assertFalse(source.contains("post(question"));
+        assertFalse(source.contains("JSON.stringify(question"));
+        assertFalse(source.contains("console.log(question"));
+    }
+
+    @Test
+    public void metaStudioCaptionFallbackStaysInsideIsolatedWrapper() throws Exception {
+        Path page = Paths.get("src", "main", "assets", "metastudio", "index.html");
+        Path styles = Paths.get("src", "main", "assets", "metastudio", "style.css");
+        String html = new String(Files.readAllBytes(page), StandardCharsets.UTF_8);
+        String css = new String(Files.readAllBytes(styles), StandardCharsets.UTF_8);
+
+        assertTrue(html.contains("id=\"local-caption\""));
+        assertTrue(html.contains("id=\"local-caption-text\""));
+        assertTrue(html.contains("aria-live=\"polite\""));
+        assertTrue(css.contains("#local-caption"));
+        assertTrue(css.contains("pointer-events: none"));
     }
 
     @Test

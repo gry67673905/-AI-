@@ -9,36 +9,158 @@
         android:layout_height="match_parent"
         android:importantForAutofill="noExcludeDescendants" />
 
+    <FrameLayout
+        android:id="@+id/digitalHumanVisionPreviewContainer"
+        android:layout_width="144dp"
+        android:layout_height="192dp"
+        android:layout_gravity="end|bottom"
+        android:layout_margin="16dp"
+        android:background="#FF000000"
+        android:visibility="gone">
+
+        <androidx.camera.view.PreviewView
+            android:id="@+id/digitalHumanVisionPreview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/digital_human_vision_preview"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <LinearLayout
+        android:id="@+id/digitalHumanDocumentOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#33000000"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="124dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="24dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#E6000000"
+            android:gravity="center"
+            android:padding="12dp"
+            android:text="@string/digital_human_document_guide"
+            android:textColor="#FFFFFFFF"
+            android:textSize="16sp" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="20dp"
+            android:layout_weight="1"
+            android:background="@drawable/document_capture_frame" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#E6000000"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:padding="12dp">
+
+            <Button
+                android:id="@+id/digitalHumanDocumentCapture"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/digital_human_document_capture" />
+
+            <Button
+                android:id="@+id/digitalHumanDocumentCancel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:text="@string/digital_human_document_cancel" />
+        </LinearLayout>
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/digitalHumanStatusPanel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
         android:background="#EFFFFFFF"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:padding="16dp">
+        android:orientation="vertical"
+        android:paddingStart="8dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="6dp">
 
-        <ProgressBar
-            android:id="@+id/digitalHumanProgress"
-            style="?android:attr/progressBarStyleSmall"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-
-        <TextView
-            android:id="@+id/digitalHumanStatus"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:layout_weight="1"
-            android:text="@string/digital_human_preparing"
-            android:textColor="#1A2433"
-            android:textSize="14sp" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/digitalHumanClose"
-            android:layout_width="wrap_content"
+            <ProgressBar
+                android:id="@+id/digitalHumanProgress"
+                style="?android:attr/progressBarStyleSmall"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:id="@+id/digitalHumanStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:maxLines="2"
+                android:text="@string/digital_human_preparing"
+                android:textColor="#1A2433"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/digital_human_close" />
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/digitalHumanVisionToggle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:text="@string/digital_human_vision_enable" />
+
+            <Button
+                android:id="@+id/digitalHumanCameraSwitch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:text="@string/digital_human_camera_switch"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/digitalHumanDocumentRecognize"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:text="@string/digital_human_document_recognize"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/digitalHumanClose"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:text="@string/digital_human_close" />
+        </LinearLayout>
     </LinearLayout>
 </FrameLayout>

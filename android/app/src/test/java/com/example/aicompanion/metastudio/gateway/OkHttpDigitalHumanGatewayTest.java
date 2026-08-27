@@ -106,6 +106,28 @@ public class OkHttpDigitalHumanGatewayTest {
         assertEquals(2, body.getAsJsonObject().size());
     }
 
+    @Test
+    public void anonymousExchangeUsesSameFixedPathWithoutAuthorization() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(
+            "{\"intent_id\":\"intent-nav\",\"type\":\"OPEN_SERVICE_NAVIGATION\","
+                + "\"label\":\"服务导航\",\"section\":\"services\","
+                + "\"prefill\":{\"service_id\":\"11111111-1111-4111-8111-111111111111\"},"
+                + "\"requires_confirmation\":true}"
+        ));
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<JsonElement> result = new AtomicReference<>();
+        AtomicReference<ApiFailure> failure = new AtomicReference<>();
+
+        gateway.exchangeActionIntent("intent-nav", "session-1", "chat-1", callback(latch, result, failure));
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertNull(failure.get());
+        RecordedRequest request = server.takeRequest(1, TimeUnit.SECONDS);
+        assertNotNull(request);
+        assertNull(request.getHeader("Authorization"));
+        assertEquals("/api/v1/integrations/metastudio/action-intents/intent-nav/exchange", request.getPath());
+    }
+
     private static <T> GatewayCallback<T> callback(
         CountDownLatch latch,
         AtomicReference<T> value,

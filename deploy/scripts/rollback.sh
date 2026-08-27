@@ -85,16 +85,17 @@ required = {
     "smart-gov/mcp-server",
     "smart-gov/mock-gov-api",
 }
+optional = {"smart-gov/material-worker"}
 found: dict[str, str] = {}
 for item in load(sys.argv[1]):
     repository = str(item.get("Repository", ""))
-    if repository not in required:
+    if repository not in required | optional:
         continue
     image_id = str(item.get("ID", ""))
     if repository in found or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{12,64}", image_id):
         raise RuntimeError("invalid application image inventory")
     found[repository] = image_id
-if set(found) != required:
+if not required.issubset(found) or set(found) - required - optional:
     raise RuntimeError("application image inventory is incomplete")
 for repository in sorted(found):
     print(f"{repository}\t{found[repository]}")
@@ -105,7 +106,7 @@ PY
     fi
     while IFS=$'\t' read -r repository image_id; do
         case "$repository" in
-            smart-gov/api|smart-gov/mcp-server|smart-gov/mock-gov-api) ;;
+            smart-gov/api|smart-gov/mcp-server|smart-gov/mock-gov-api|smart-gov/material-worker) ;;
             *) rm -f "$mapping"; return 1 ;;
         esac
         source_id="$(docker image inspect --format '{{.Id}}' "$image_id" 2>/dev/null)" || {
@@ -127,11 +128,32 @@ PY
         count=$((count + 1))
     done <"$mapping"
     rm -f "$mapping"
-    [ "$count" -eq 3 ]
+    [ "$count" -eq 3 ] || [ "$count" -eq 4 ]
 }
 
 prepare_release_application_aliases "$target_release" "${release_dir}/images.json" ||
     die "Rollback application images do not match the immutable target snapshot: ${target_release}"
+
+canonical_services_for_active_compose() {
+    printf '%s\n' postgres redis etcd minio milvus mock-gov-api mcp-server api
+    if cloud_compose config --services | grep -Fxq material-worker; then
+        printf '%s\n' material-worker
+    fi
+}
+
+remove_unmanaged_material_worker() {
+    local -a worker_ids=()
+    if cloud_compose config --services | grep -Fxq material-worker; then
+        return 0
+    fi
+    mapfile -t worker_ids < <(docker ps -aq \
+        --filter label=com.docker.compose.project=smart-gov-cloud-demo \
+        --filter label=com.docker.compose.service=material-worker)
+    if [ "${#worker_ids[@]}" -gt 0 ]; then
+        docker stop --time 15 "${worker_ids[@]}" >/dev/null 2>&1 || true
+        docker rm "${worker_ids[@]}" >/dev/null 2>&1 || true
+    fi
+}
 
 current_release=""
 if [ -s "${STATE_DIR}/current-release" ]; then
@@ -213,6 +235,7 @@ esac
 rollback_started=false
 restore_previous_runtime() {
     local status="$?" restore_rag_mode restore_status=0
+    local -a restore_services=() restore_worker_args=()
     trap - EXIT
     rm -f "$sanitized_backup_env" 2>/dev/null || true
     if [ "$status" -ne 0 ] && [ "$rollback_started" = true ]; then
@@ -246,12 +269,19 @@ restore_previous_runtime() {
             *) restore_rag_mode=disabled ;;
         esac
         if [ "$restore_status" -eq 0 ]; then
-            cloud_compose up -d --no-build --remove-orphans \
-                postgres redis etcd minio milvus mock-gov-api mcp-server api || restore_status=1
+            # This compose view omits api-candidate, which may still carry
+            # public traffic on 18001 during canonical recovery.
+            remove_unmanaged_material_worker || restore_status=1
+            mapfile -t restore_services < <(canonical_services_for_active_compose)
+            if printf '%s\n' "${restore_services[@]}" | grep -Fxq material-worker; then
+                restore_worker_args=(--worker-service material-worker)
+            fi
+            cloud_compose up -d --no-build "${restore_services[@]}" || restore_status=1
             COMPOSE_FILE="$COMPOSE_FILE" CLOUD_ENV_FILE="$CLOUD_ENV_FILE" \
             METASTUDIO_COMPOSE_FILE="$METASTUDIO_COMPOSE_FILE" RELEASE_TAG="${RELEASE_TAG:-}" \
                 "${SCRIPT_DIR}/health-check.sh" --timeout "$health_timeout" \
-                    --expect-rag "$restore_rag_mode" || restore_status=1
+                    --expect-rag "$restore_rag_mode" \
+                    "${restore_worker_args[@]}" || restore_status=1
             if [ "$restore_status" -eq 0 ]; then
                 # Run the fail-fast verifier in a subshell so a mismatch marks
                 # restoration unsuccessful without bypassing this trap's
@@ -274,12 +304,19 @@ restore_previous_runtime() {
 trap restore_previous_runtime EXIT
 
 rollback_started=true
-cloud_compose up -d --no-build --remove-orphans \
-    postgres redis etcd minio milvus mock-gov-api mcp-server api
+# Preserve a parallel candidate until traffic has explicitly returned to the
+# canonical API and stop-candidate.sh performs its guarded cleanup.
+remove_unmanaged_material_worker
+mapfile -t target_services < <(canonical_services_for_active_compose)
+target_worker_args=()
+if printf '%s\n' "${target_services[@]}" | grep -Fxq material-worker; then
+    target_worker_args=(--worker-service material-worker)
+fi
+cloud_compose up -d --no-build "${target_services[@]}"
 COMPOSE_FILE="$COMPOSE_FILE" CLOUD_ENV_FILE="$CLOUD_ENV_FILE" \
 METASTUDIO_COMPOSE_FILE="$METASTUDIO_COMPOSE_FILE" RELEASE_TAG="$RELEASE_TAG" \
     "${SCRIPT_DIR}/health-check.sh" --timeout "$health_timeout" \
-        --expect-rag "$target_rag_mode"
+        --expect-rag "$target_rag_mode" "${target_worker_args[@]}"
 require_release_images "$target_release" "${release_dir}/images.json"
 
 active_cloud_env_temporary="$(mktemp "${active_cloud_env_file}.rollback.XXXXXX")"

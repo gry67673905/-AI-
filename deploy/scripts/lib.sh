@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${PROJECT_ROOT}/compose.cloud.yaml}"
 METASTUDIO_COMPOSE_FILE="${METASTUDIO_COMPOSE_FILE:-${PROJECT_ROOT}/compose.metastudio.yaml}"
+CANDIDATE_COMPOSE_FILE="${CANDIDATE_COMPOSE_FILE:-${PROJECT_ROOT}/compose.candidate.yaml}"
 CLOUD_ENV_FILE="${CLOUD_ENV_FILE:-${PROJECT_ROOT}/deploy/cloud.env}"
 SECRETS_DIR="${PROJECT_ROOT}/deploy/secrets"
 STATE_DIR="${PROJECT_ROOT}/deploy/state"
@@ -53,6 +54,79 @@ cloud_compose() {
     fi
 }
 
+candidate_release_tag() {
+    local marker="${STATE_DIR}/candidate-release" value
+    [ -s "$marker" ] && [ ! -L "$marker" ] || return 1
+    value="$(awk -F= '$1 == "release_tag" {print $2}' "$marker")"
+    [ -n "$value" ] || return 1
+    validate_release_tag "$value"
+    printf '%s\n' "$value"
+}
+
+deployment_bundle_sha256() {
+    local digest file index label manifest="" secret_name
+    local -a bundle_labels=(
+        compose.cloud.yaml
+        compose.candidate.yaml
+        deploy/cloud.env
+        deploy/container-secret-entrypoint.sh
+    )
+    local -a bundle_files=(
+        "$COMPOSE_FILE"
+        "$CANDIDATE_COMPOSE_FILE"
+        "$CLOUD_ENV_FILE"
+        "${PROJECT_ROOT}/deploy/container-secret-entrypoint.sh"
+    )
+    if metastudio_enabled; then
+        bundle_labels+=(compose.metastudio.yaml)
+        bundle_files+=("$METASTUDIO_COMPOSE_FILE")
+    fi
+
+    for index in "${!bundle_files[@]}"; do
+        file="${bundle_files[$index]}"
+        label="${bundle_labels[$index]}"
+        [ -f "$file" ] && [ ! -L "$file" ] ||
+            die "Deployment bundle file is missing or unsafe: ${label}"
+        digest="$(sha256sum -- "$file" | awk '{print $1}')"
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] ||
+            die "Could not hash deployment bundle file: ${label}"
+        manifest+="${digest}  ${label}"$'\n'
+    done
+    while IFS= read -r secret_name; do
+        [ -n "$secret_name" ] || continue
+        file="${SECRETS_DIR}/${secret_name}"
+        [ -f "$file" ] && [ ! -L "$file" ] ||
+            die "Deployment secret is missing or unsafe: ${secret_name}"
+        digest="$(sha256sum -- "$file" | awk '{print $1}')"
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] ||
+            die "Could not hash deployment secret: ${secret_name}"
+        manifest+="${digest}  deploy/secrets/${secret_name}"$'\n'
+    done < <(find "$SECRETS_DIR" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+    printf '%s' "$manifest" | sha256sum | awk '{print $1}'
+}
+
+candidate_compose() {
+    local resolved_release="${RELEASE_TAG:-}"
+    local -a compose_files=(-f "$COMPOSE_FILE")
+    [ -f "$CANDIDATE_COMPOSE_FILE" ] || die "Missing compose.candidate.yaml."
+    if metastudio_enabled; then
+        compose_files+=(-f "$METASTUDIO_COMPOSE_FILE")
+    fi
+    compose_files+=(-f "$CANDIDATE_COMPOSE_FILE")
+    if [ -z "$resolved_release" ]; then
+        resolved_release="$(candidate_release_tag 2>/dev/null || true)"
+    fi
+    if [ -n "$resolved_release" ]; then
+        RELEASE_TAG="$resolved_release" docker compose \
+            --project-directory "$PROJECT_ROOT" --env-file "$CLOUD_ENV_FILE" \
+            "${compose_files[@]}" --profile candidate "$@"
+    else
+        docker compose --project-directory "$PROJECT_ROOT" \
+            --env-file "$CLOUD_ENV_FILE" "${compose_files[@]}" \
+            --profile candidate "$@"
+    fi
+}
+
 cloud_env_value() {
     local key="$1"
     awk -F= -v key="$key" '
@@ -92,6 +166,67 @@ metastudio_enabled() {
     esac
 }
 
+material_documents_enabled() {
+    [ -f "$CLOUD_ENV_FILE" ] || return 1
+    case "$(cloud_env_value MATERIAL_DOCUMENTS_ENABLED)" in
+        true|TRUE|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_material_documents_config() {
+    local mode owner_uid value secret_path="${SECRETS_DIR}/vision_dashscope_api_key"
+    local materials_bucket knowledge_bucket templates_bucket generated_bucket
+    [ -f "$CLOUD_ENV_FILE" ] ||
+        die "Missing deploy/cloud.env; material-document configuration cannot be checked."
+    material_documents_enabled ||
+        die "Cloud deployment must set MATERIAL_DOCUMENTS_ENABLED=true."
+    [ "$(cloud_env_value MATERIAL_TEMPLATE_PROVIDER)" = dashscope ] ||
+        die "Cloud material-template provider must be the pinned DashScope adapter."
+    [ "$(cloud_env_value MATERIAL_TEMPLATE_MODEL)" = qwen3-vl-flash-2026-01-22 ] ||
+        die "Cloud material-template model must be qwen3-vl-flash-2026-01-22."
+    [ "$(cloud_env_value MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL)" = \
+        https://dashscope.aliyuncs.com/compatible-mode/v1 ] ||
+        die "Cloud material-template base URL must be the pinned DashScope endpoint."
+    materials_bucket="$(cloud_env_value MATERIALS_BUCKET)"
+    knowledge_bucket="$(cloud_env_value KNOWLEDGE_BUCKET)"
+    templates_bucket="$(cloud_env_value MATERIAL_TEMPLATES_BUCKET)"
+    generated_bucket="$(cloud_env_value GENERATED_DOCUMENTS_BUCKET)"
+    [ -n "$materials_bucket" ] && [ -n "$knowledge_bucket" ] &&
+        [ -n "$templates_bucket" ] && [ -n "$generated_bucket" ] ||
+        die "Cloud deployment must explicitly configure all four MinIO buckets."
+    materials_bucket="${materials_bucket,,}"
+    knowledge_bucket="${knowledge_bucket,,}"
+    templates_bucket="${templates_bucket,,}"
+    generated_bucket="${generated_bucket,,}"
+    [ "$materials_bucket" != "$knowledge_bucket" ] &&
+        [ "$materials_bucket" != "$templates_bucket" ] &&
+        [ "$materials_bucket" != "$generated_bucket" ] &&
+        [ "$knowledge_bucket" != "$templates_bucket" ] &&
+        [ "$knowledge_bucket" != "$generated_bucket" ] &&
+        [ "$templates_bucket" != "$generated_bucket" ] ||
+        die "Materials, knowledge, template sources and generated documents must use four distinct MinIO buckets."
+    value="$(cloud_env_value MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT)"
+    [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 10000 ] ||
+        die "MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT must be an integer between 1 and 10000."
+    [ -z "$(cloud_env_value MATERIAL_TEMPLATE_DASHSCOPE_API_KEY)" ] ||
+        die "Do not place MATERIAL_TEMPLATE_DASHSCOPE_API_KEY in deploy/cloud.env; use its Docker secret file."
+    [ -z "$(cloud_env_value MATERIAL_TEMPLATE_DASHSCOPE_API_KEY_FILE)" ] ||
+        die "Do not override MATERIAL_TEMPLATE_DASHSCOPE_API_KEY_FILE in deploy/cloud.env."
+    [ -f "$secret_path" ] && [ -s "$secret_path" ] ||
+        die "Missing or empty Docker secret: vision_dashscope_api_key"
+    [ ! -L "$secret_path" ] ||
+        die "Docker secret vision_dashscope_api_key must not be a symbolic link."
+    owner_uid="$(stat -c '%u' "$secret_path")"
+    [ "$owner_uid" = 0 ] ||
+        die "Docker secret vision_dashscope_api_key must be owned by root."
+    mode="$(stat -c '%a' "$secret_path")"
+    case "$mode" in
+        600|400) ;;
+        *) die "Docker secret vision_dashscope_api_key must have mode 600 or 400, found ${mode}." ;;
+    esac
+}
+
 require_metastudio_config() {
     local key value
     # Cloud deployment must never fall back to direct plaintext credential
@@ -101,7 +236,8 @@ require_metastudio_config() {
     for key in \
         METASTUDIO_APP_KEY \
         METASTUDIO_HUAWEI_ACCESS_KEY \
-        METASTUDIO_HUAWEI_SECRET_KEY; do
+        METASTUDIO_HUAWEI_SECRET_KEY \
+        VISION_DASHSCOPE_API_KEY; do
         [ -z "$(cloud_env_value "$key")" ] ||
             die "Do not place ${key} in deploy/cloud.env; use its Docker secret file."
     done
@@ -136,13 +272,28 @@ require_metastudio_config() {
     [ "$(cloud_env_value METASTUDIO_SERVER_ADDRESS)" = \
         metastudio-api.cn-north-4.myhuaweicloud.com ] ||
         die "MetaStudio client endpoint is not the pinned Beijing-4 endpoint."
+    [ "$(cloud_env_value VISION_ENABLED)" = true ] ||
+        die "Cloud MetaStudio deployment must enable the bounded vision adapter."
+    [ "$(cloud_env_value VISION_PROVIDER)" = dashscope ] ||
+        die "Cloud vision provider must be the pinned DashScope adapter."
+    [ "$(cloud_env_value VISION_TURN_CLOSE_WAIT_MS)" = 2000 ] ||
+        die "Cloud vision turn-close wait must be exactly 2000 milliseconds."
+    vision_daily_limit="$(cloud_env_value VISION_ANALYSIS_GLOBAL_DAILY)"
+    [[ "$vision_daily_limit" =~ ^[0-9]+$ ]] ||
+        die "Cloud vision global daily analysis limit must be an integer."
+    [ "$vision_daily_limit" -ge 20 ] && [ "$vision_daily_limit" -le 200 ] ||
+        die "Cloud vision global daily analysis limit must be between 20 and 200."
+    [ "$(cloud_env_value VISION_FAST_MAX_CONCURRENCY)" = 2 ] ||
+        die "Cloud fast-vision concurrency must be exactly 2."
     python3 - \
         "$(cloud_env_value METASTUDIO_CALLBACK_URL)" \
         "${PROJECT_ROOT}/android/app/src/main/assets/metastudio/sdk" \
         "$(cloud_env_value METASTUDIO_SDK_VERSION)" \
         "${SECRETS_DIR}/metastudio_app_key" \
         "${SECRETS_DIR}/metastudio_huawei_access_key" \
-        "${SECRETS_DIR}/metastudio_huawei_secret_key" <<'PY'
+        "${SECRETS_DIR}/metastudio_huawei_secret_key" \
+        "${SECRETS_DIR}/vision_dashscope_api_key" \
+        "$(cloud_env_value VISION_DASHSCOPE_BASE_URL)" <<'PY'
 import json
 import hashlib
 import re
@@ -163,6 +314,18 @@ if (
     or callback.path != "/api/v1/integrations/metastudio/llm"
 ):
     raise SystemExit("MetaStudio callback must be the pinned argument-free public HTTPS IP integration URL.")
+
+vision_base = urlsplit(sys.argv[-1])
+if (
+    vision_base.scheme != "https"
+    or not vision_base.hostname
+    or vision_base.username is not None
+    or vision_base.password is not None
+    or vision_base.query
+    or vision_base.fragment
+    or vision_base.path.rstrip("/") != "/compatible-mode/v1"
+):
+    raise SystemExit("DashScope vision base URL must be a credential-free HTTPS compatible-mode/v1 endpoint.")
 
 sdk_dir = Path(sys.argv[2])
 marker_path = sdk_dir / "sdk-integrity.json"
@@ -219,7 +382,7 @@ for relative_path, expected in expected_files.items():
     if actual != expected:
         raise SystemExit(f"MetaStudio SDK asset is missing or modified: {relative_path}")
 
-for index, raw_path in enumerate(sys.argv[4:]):
+for index, raw_path in enumerate(sys.argv[4:-1]):
     path = Path(raw_path)
     try:
         raw = path.read_bytes()
@@ -296,6 +459,13 @@ validate_ipv4() {
     done
 }
 
+validate_upstream_port() {
+    case "$1" in
+        18000|18001) return 0 ;;
+        *) die "Nginx upstream port must be exactly 18000 or 18001." ;;
+    esac
+}
+
 require_public_cutover_ready() {
     local public_ipv4="$1" release_tag paid_marker_sha
     validate_ipv4 "$public_ipv4" || die "A valid public IPv4 is required for the public cutover marker."
@@ -363,8 +533,24 @@ def normalized(path: str) -> dict[str, tuple[str, str, str]]:
     return result
 
 
-expected = normalized(sys.argv[1])
-running = normalized(sys.argv[2])
+def is_parallel_candidate(container_name: str) -> bool:
+    """Candidate inventory is validated separately and may disappear post-cutover."""
+    return (
+        "-api-candidate-" in container_name
+        or "-material-worker-candidate-" in container_name
+    )
+
+
+expected = {
+    name: value
+    for name, value in normalized(sys.argv[1]).items()
+    if not is_parallel_candidate(name)
+}
+running = {
+    name: value
+    for name, value in normalized(sys.argv[2]).items()
+    if not is_parallel_candidate(name)
+}
 if set(expected) != set(running):
     raise SystemExit(1)
 application_repositories = {
@@ -372,6 +558,8 @@ application_repositories = {
     "smart-gov/mcp-server",
     "smart-gov/mock-gov-api",
 }
+if any(value[1] == "smart-gov/material-worker" for value in expected.values()):
+    application_repositories.add("smart-gov/material-worker")
 for name, expected_value in expected.items():
     running_value = running[name]
     expected_id, expected_repository, expected_tag = expected_value
@@ -387,9 +575,17 @@ for name, expected_value in expected.items():
     elif expected_tag != running_tag:
         raise SystemExit(1)
 for repository in application_repositories:
-    if sum(1 for value in running.values() if value[1] == repository) != 1:
+    if sum(
+        1
+        for name, value in running.items()
+        if value[1] == repository and not is_parallel_candidate(name)
+    ) != 1:
         raise SystemExit(1)
-api = [value for value in running.values() if value[1] == "smart-gov/api"]
+api = [
+    value
+    for name, value in running.items()
+    if value[1] == "smart-gov/api" and not is_parallel_candidate(name)
+]
 if len(api) != 1 or api[0][2] != sys.argv[3]:
     raise SystemExit(1)
 PY
@@ -431,6 +627,9 @@ required_secret_names() {
             metastudio_app_key \
             metastudio_huawei_access_key \
             metastudio_huawei_secret_key
+    fi
+    if metastudio_enabled || material_documents_enabled; then
+        printf '%s\n' vision_dashscope_api_key
     fi
 }
 

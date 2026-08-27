@@ -45,6 +45,7 @@ class ChatQuota:
         anonymous_daily: int,
         authenticated_daily: int,
         global_daily: int,
+        exempt_subject_hashes: set[str] | frozenset[str] | None = None,
         key_namespace: str = "chat",
         dependency_name: str = "chat_quota",
         subject_message: str = "今日智能问答额度已用完，请明日再试",
@@ -52,11 +53,15 @@ class ChatQuota:
     ) -> None:
         if not re.fullmatch(r"[a-z0-9-]{1,48}", key_namespace):
             raise ValueError("invalid quota key namespace")
+        exemptions = frozenset(exempt_subject_hashes or ())
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in exemptions):
+            raise ValueError("invalid quota exemption subject")
         self.enabled = enabled
         self.hmac_key = hmac_key.encode("utf-8")
         self.anonymous_daily = anonymous_daily
         self.authenticated_daily = authenticated_daily
         self.global_daily = global_daily
+        self.exempt_subject_hashes = exemptions
         self.key_namespace = key_namespace
         self.dependency_name = dependency_name
         self.subject_message = subject_message
@@ -77,6 +82,8 @@ class ChatQuota:
             return
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
         subject = self._subject(account_id, client_ip)
+        if subject in self.exempt_subject_hashes:
+            return
         subject_limit = (
             self.authenticated_daily if account_id else self.anonymous_daily
         )

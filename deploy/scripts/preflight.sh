@@ -10,6 +10,7 @@ public_ipv4="${PUBLIC_IPV4:-}"
 security_group_confirmed="${HTTPS_SECURITY_GROUP_CONFIRMED:-false}"
 minimum_memory_gib="${MINIMUM_MEMORY_GIB:-8}"
 minimum_disk_gib="${MINIMUM_DISK_GIB:-20}"
+candidate_port_required=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -18,6 +19,7 @@ while [ "$#" -gt 0 ]; do
         --https-security-group-confirmed) security_group_confirmed=true; shift ;;
         --minimum-memory-gib) minimum_memory_gib="${2:-}"; shift 2 ;;
         --minimum-disk-gib) minimum_disk_gib="${2:-}"; shift 2 ;;
+        --candidate-port-required) candidate_port_required=true; shift ;;
         *) die "Unknown preflight option: $1" ;;
     esac
 done
@@ -38,6 +40,20 @@ if [ "$(uname -s)" != "Linux" ]; then
     fail "Cloud deployment requires Linux."
 else
     pass "Linux host detected."
+fi
+
+if [ "$candidate_port_required" = true ]; then
+    if ss -H -ltn '( sport = :18001 )' 2>/dev/null | grep -q .; then
+        if command -v docker >/dev/null 2>&1 &&
+            docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null |
+                grep -Eq 'smart-gov-cloud-demo-api-candidate-[0-9]+ .*127\.0\.0\.1:18001->8000'; then
+            info "Port 18001 is already owned by the parallel API candidate."
+        else
+            fail "Loopback port 18001 is occupied by a process other than the API candidate."
+        fi
+    else
+        pass "Loopback port 18001 is available for the API candidate."
+    fi
 fi
 
 case "$(uname -m)" in
@@ -111,6 +127,16 @@ if command -v docker >/dev/null 2>&1; then
     info "Docker is installed: $(docker --version 2>/dev/null || true)"
 else
     info "Docker is not installed. Run install-docker.sh only after this preflight passes."
+fi
+
+if [ -f "$CLOUD_ENV_FILE" ]; then
+    if (require_material_documents_config); then
+        pass "Material-document provider, model, endpoint and Docker secret are pinned."
+    else
+        fail "Material-document deployment configuration is incomplete or unsafe."
+    fi
+else
+    info "deploy/cloud.env is not present yet; material-document deployment configuration was not checked."
 fi
 
 if [ "$failures" -ne 0 ]; then

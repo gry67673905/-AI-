@@ -1,6 +1,7 @@
 package com.example.aicompanion.metastudio.business;
 
 import com.example.aicompanion.metastudio.model.DigitalHumanContract.NavigationIntent;
+import com.example.aicompanion.navigation.business.ServiceIdPolicy;
 import com.example.aicompanion.portal.business.RoleNavigationPolicy;
 import com.example.aicompanion.portal.model.PortalContract.Role;
 import com.google.gson.JsonElement;
@@ -59,11 +60,36 @@ public final class DigitalHumanActionPolicy {
             return Decision.denied("invalid_intent_label", "数字人操作说明无效");
         }
         Role effectiveRole = role == null ? Role.ANONYMOUS : role;
-        if (!navigationPolicy.canNavigate(effectiveRole, section)) {
-            return Decision.denied("forbidden_navigation", "当前账号不能打开数字人建议的工作台");
-        }
         if (!confirmation) {
             return Decision.denied("confirmation_required", "数字人操作必须由用户确认");
+        }
+        if ("OPEN_SERVICE_NAVIGATION".equals(type)) {
+            if (!"services".equals(section)) {
+                return Decision.denied("invalid_navigation_section", "服务导航只能打开事项服务页");
+            }
+            JsonElement rawPrefill = object.get("prefill");
+            if (rawPrefill == null || !rawPrefill.isJsonObject()
+                || rawPrefill.getAsJsonObject().size() != 1
+                || !rawPrefill.getAsJsonObject().has("service_id")) {
+                return Decision.denied("invalid_navigation_prefill", "服务导航只能携带事项编号");
+            }
+            JsonElement serviceIdValue = rawPrefill.getAsJsonObject().get("service_id");
+            if (serviceIdValue == null || !serviceIdValue.isJsonPrimitive()
+                || !serviceIdValue.getAsJsonPrimitive().isString()) {
+                return Decision.denied("invalid_navigation_prefill", "服务导航事项编号无效");
+            }
+            String serviceId = new ServiceIdPolicy().normalize(serviceIdValue.getAsString());
+            if (serviceId == null) {
+                return Decision.denied("invalid_navigation_prefill", "服务导航事项编号必须是标准 UUID");
+            }
+            JsonObject strictPrefill = new JsonObject();
+            strictPrefill.addProperty("service_id", serviceId);
+            return Decision.allowed(new NavigationIntent(
+                intentId, type, label, "services", strictPrefill, true
+            ));
+        }
+        if (!navigationPolicy.canNavigate(effectiveRole, section)) {
+            return Decision.denied("forbidden_navigation", "当前账号不能打开数字人建议的工作台");
         }
         // Appointments are rendered inside the existing citizen applications workspace.
         String portalSection = "appointments".equals(section) ? "applications" : section;

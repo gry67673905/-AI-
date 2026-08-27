@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from uuid import uuid4
 
 import pytest
@@ -97,6 +99,45 @@ async def test_disabled_quota_never_touches_redis() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_opaque_subject_exemption_bypasses_all_counters() -> None:
+    hmac_key = "test-hmac-key"
+    client_ip = "203.0.113.10"
+    subject = hmac.new(
+        hmac_key.encode("utf-8"),
+        f"ip:{client_ip}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    quota = ChatQuota(
+        "redis://unused",
+        hmac_key,
+        enabled=True,
+        anonymous_daily=1,
+        authenticated_daily=1,
+        global_daily=1,
+        exempt_subject_hashes={subject},
+    )
+    fake = FakeRedis([0, 1, 1, 1])
+    quota.client = fake  # type: ignore[assignment]
+
+    await quota.consume(None, client_ip)
+
+    assert fake.calls == []
+
+
+def test_quota_rejects_non_opaque_exemption_values() -> None:
+    with pytest.raises(ValueError, match="invalid quota exemption subject"):
+        ChatQuota(
+            "redis://unused",
+            "test-hmac-key",
+            enabled=True,
+            anonymous_daily=10,
+            authenticated_daily=30,
+            global_daily=200,
+            exempt_subject_hashes={"203.0.113.10"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_enabled_quota_fails_closed_when_redis_is_unavailable() -> None:
     quota = ChatQuota(
         "redis://unused",
@@ -154,3 +195,25 @@ def test_demo_environment_accepts_exact_acknowledgement() -> None:
     )
     runtime = BusinessRuntime(settings, None, None, None, None, None, None)
     assert runtime.sms.enabled is True
+    assert runtime.metastudio.vision is runtime.vision
+    assert runtime.vision._authorize_client_session.__self__ is runtime.metastudio
+    assert runtime.vision_analysis_quota is None
+    assert not hasattr(runtime.vision_analyzer, "_quota")
+
+
+@pytest.mark.asyncio
+async def test_dashscope_runtime_wires_global_quota_only_to_real_provider() -> None:
+    settings = Settings(
+        ENVIRONMENT="local",
+        ENABLE_DEMO_PROVIDERS=False,
+        VISION_PROVIDER="dashscope",
+        VISION_DASHSCOPE_API_KEY="test-only-vision-key",
+        VISION_ANALYSIS_GLOBAL_DAILY=37,
+    )
+    runtime = BusinessRuntime(settings, None, None, None, None, None, None)
+
+    assert runtime.vision_analysis_quota is not None
+    assert runtime.vision_analyzer._quota is runtime.vision_analysis_quota
+    assert runtime.vision_analysis_quota._daily_limit == 37
+
+    await runtime.close()

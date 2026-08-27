@@ -56,6 +56,10 @@ APPID/APPKEY 是本项目专用的回调身份，不是华为 AK/SK、Project ID
 
 SIS 实时语音识别需要在华为云开通，并授权 MetaStudio 委托调用。SIS、RTC、数字人口型和播报均由 MetaStudio 侧完成：本项目后端不直接调用 SIS，不保存 SIS endpoint/credential，也不接收或转发原始音频；数字人页不同时启动 Android `SpeechRecognizer` 或本地 TTS。现有端侧语音能力只保留给普通聊天模式。
 
+数字人包装页启用 Web SDK 官方字幕并注册 `speechRecognized` 事件。SDK 自身按照 `chatId + resultId` 覆盖显示中间文字，`isLast=true` 后进入等待回答状态；本项目不再复制、拼接或保存一份字幕原文。包装页只向原生消息桥发送 `asr_partial`、`asr_final` 等固定状态枚举；它不会通过原生桥或新增请求转发 `speechRecognized` 的语音原文及其 `chatId`/`resultId`，也不会把中间结果写入公共缓存或日志。MetaStudio 官方 LLM 回调协议中原有的会话字段不受此限制。最终 `semanticRecognized` 事件只将经校验的不透明语义 `chatId` 和 `intent_id` 交给原生层及意图交换接口，不携带 ASR 原文。迟到包、非法包和最终包后的同轮状态会被忽略；休眠或会话结束后的事件也不再接受。第三方 LLM 回调仍只处理 MetaStudio 提交的完整 `messages`，不得因为本地中间结果额外发起模型、RAG 或业务操作。
+
+SDK 启动参数显式设置 `enableCollectAudioDemand=false`，因此用户首次主动开始语音会话后持续拾音，直至 Activity 离开前台并销毁任务；设置 `enableVadInterrupt=true` 允许人声打断数字人播报。首次开始仍保留用户点击和麦克风授权，不在页面加载时静默开麦。尾静音负责产生每轮最终结果，持续拾音不等于取消问答轮次边界。
+
 初始热词至少配置：`一网通办`、`社保卡`、`公积金`、`营业执照`、`身份证补领`。首轮真机验收后只根据脱敏的误识别统计调整热词，不把群众原始录音或完整 ASR 文本写入运维日志。
 
 ## 华北－北京四固定参数
@@ -165,6 +169,47 @@ sudo bash deploy/scripts/verify-metastudio-smoke.sh \
 该模式只发送合成的错误 HMAC，必须在外呼前返回 400，并检查新增日志字节不含伪造值或 `time_stamp`。它不会申请 onceCode、启动数字人任务、调用 SIS、DeepSeek 或其他计费接口。MetaStudio 配置完整且已启用时，脚本刻意跳过 `client-sessions`，真实一次联调必须另行获得付费和数据处理授权。
 
 `/health/ready` 不调用 IAM、MetaStudio 或 SIS，也不会为了探针申请 onceCode。MetaStudio 的就绪性采用“部署前静态硬门禁 + 上述零付费负向 smoke”；启用后的真实供应方连通性只能在取得计费、账号和数据处理授权后单独验收。因此既有 7/8 项 readiness 统计不会因可选 MetaStudio 增加一项付费探针。
+
+## 视觉对话云端候选
+
+视觉能力是独立、可选的数据通道，不改变 MetaStudio 对麦克风、SIS、RTC 与数字人播报的所有权。Android 只用 CameraX 显示预览和分析帧，不启用录制；摄像头默认关闭，用户首次主动开启时显示知情提示。首个 ASR partial 到 final 期间，CameraX 以不超过 2 FPS 持续评估场景变化，并保留约 1 秒、最多两张的纯内存前置帧。每轮最多选择 7 张普通候选和 1 张保留结束帧；JPEG 单张约不超过 96 KiB，重新编码会去除 EXIF。该上限与旧版 `3 × 256 KiB` 的最坏单轮网络量相同。
+
+登录用户先以现有 JWT 调用：
+
+```text
+POST /api/v1/integrations/metastudio/vision-sessions
+```
+
+请求只包含现有 `client_session_id`。后端校验会话所有者、角色和令牌版本后返回 `vision_session_id`、固定 `vision_websocket_url`、60 秒单次使用的 `vision_token` 和过期时间。Android 必须确认返回地址与自身受信任 API Origin 派生出的固定 WSS 路径完全一致；原生 OkHttp 随即连接：
+
+```text
+WSS /api/v1/integrations/metastudio/vision/ws
+Authorization: Bearer <vision_token>
+```
+
+令牌不放入 URL、WebView 或日志。客户端先发送 `vision.start`，每轮发送 `turn.start`、最多八张二进制帧和 `turn.end`。二进制帧为“4 字节无符号大端 JSON 头长度 + UTF-8 JSON 头 + JPEG”；JSON 头严格只允许 `v`、`type`、`turn_seq`、`frame_seq`、`captured_at_ms`、`width`、`height`、`camera`。服务端对接收或主动丢弃的每一张合法帧都返回带 `status` 的 `vision.ack`，客户端同一时间只保留一张未确认帧；最终帧使用独立保留槽，`turn.end` 排在其 ACK 之后。
+
+原始 JPEG 只存在当前 API 进程的有界内存中，30 秒过期；完成分析、断线或异常后立即释放，不写 PostgreSQL、Redis、MinIO、临时目录、审计日志或公共缓存。Redis 只保存不可逆摘要索引的短期单次票据声明。
+
+本地 Mock 调试配置为：
+
+```dotenv
+VISION_ENABLED=true
+VISION_PROVIDER=mock
+VISION_FAST_PROVIDER=mock
+```
+
+两个 `mock` 适配器都不发起任何外部请求。快通道可显式切换为 `VISION_FAST_PROVIDER=http`，调用单独部署的检测服务；其统一事件仅包含 `quality/object/track/action/ocr`，每个会话采用 latest-wins、全局最多两个并发任务。事件写入带 TTL 的结构化时间线，不含 JPEG；RT-DETR、PP-Tracking、动作识别与 OCR 可以在该服务内独立组合，任一模型失败都只缺少对应事实，不改变主问答路径。
+
+慢通道由 `VISION_PROVIDER=dashscope` 和独立 root-only `vision_dashscope_api_key` 显式启用，对北京地域固定快照 `qwen3-vl-flash-2026-01-22` 每轮最多发起一次、5 秒超时、无重试的请求，并使用结构化 JSON 输出。它不再阻塞本轮正常回答：已完成的快事件可立即参与一次主模型调用，Qwen 迟到摘要只进入下一轮的短期视觉记忆。每会话只允许一个慢请求在途和一个最新待处理轮次，已开始的计费请求不会被新断句取消。Redis 以北京时间自然日执行全局 20 次原子限额；限额、超时、非法 JSON 或模型错误都不会生成固定失败回答，也不会额外调用所谓降级模型。
+
+本机可由 `scripts/init-env.ps1` 从工作区外层、忽略提交的 `key-list.txt` 读取 `Qwen3-vl-flash key` 与 `Qwen3-vl-flash url`。脚本只把它们写入本机 `.env`，不回显密钥；URL 必须精确归一化为 `https://dashscope.aliyuncs.com/compatible-mode/v1`，运行时代码也会再次拒绝任何其他主机或路径，避免视觉密钥被重定向。
+
+事项匹配、MCP 和 RAG 只可使用经过二次过滤的物品、可见文字和政务检索关键词。人物、场景和身体信息只进入最终回答模型用于调整表达语气，不能进入公共缓存、操作意图、权限、资格、审核或业务状态。视觉轮次整体绕过公共回答缓存，持久化用户消息和所有操作意图始终以原始语音问题为准。
+
+真机候选从首个 partial 到 final 持续筛选并上传每轮最多八张 JPEG，不上传完整视频；服务端只为慢模型保留有代表性的起始和最新尾帧，并让全部合格帧参与快事件分析。所有真实 Qwen 调用必须经过上述 Redis 日限额。原始帧仍不得落盘、入库、进入 Redis、对象存储或日志。
+
+最终文本只生成一次。系统提示要求按问题意图和复杂度自动决定详略，不设置固定文字数上下限、不做二次改写；历史以真实用户/助手角色传入。登录用户的脱敏显示名、代码枚举角色和主体类型只用于自然称呼与语气，不作为资格、权限或政策事实，也不从人脸推断身份。
 
 ## 真机技术 PoC 与发布硬门禁
 

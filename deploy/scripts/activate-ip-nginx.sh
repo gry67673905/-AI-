@@ -17,26 +17,38 @@ require_cloud_files
 bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" --skip-http
 
 public_ipv4="${PUBLIC_IPV4:-}"
+upstream_port=18000
 confirm_cutover=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --public-ipv4) public_ipv4="${2:-}"; shift 2 ;;
+        --upstream-port) upstream_port="${2:-}"; shift 2 ;;
         --confirm-cutover) confirm_cutover=true; shift ;;
         *) die "Unknown IP Nginx activation option: $1" ;;
     esac
 done
 validate_ipv4 "$public_ipv4" || die "A valid public IPv4 must be supplied."
+validate_upstream_port "$upstream_port"
 [ "$confirm_cutover" = true ] || die "Refusing to switch traffic without --confirm-cutover."
 
 install -d -o root -g root -m 755 /run/lock
 exec 8>/run/lock/smart-gov-cutover.lock
 flock -n 8 || die "Another cutover or legacy-retirement operation is already running."
 export SMART_GOV_CUTOVER_LOCK_HELD=1
-require_rag_cutover_ready
-require_cutover_smoke_ready
-require_current_release_images
-current_release="$(<"${STATE_DIR}/current-release")"
-validate_release_tag "$current_release"
+if [ "$upstream_port" = 18001 ]; then
+    current_release="$(candidate_release_tag)" ||
+        die "A validated candidate release marker is required for upstream 18001."
+    export RELEASE_TAG="$current_release"
+    "${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled \
+        --loopback-port 18001 --api-service api-candidate \
+        --worker-service material-worker-candidate
+else
+    require_rag_cutover_ready
+    require_cutover_smoke_ready
+    require_current_release_images
+    current_release="$(<"${STATE_DIR}/current-release")"
+    validate_release_tag "$current_release"
+fi
 
 live_dir="/etc/letsencrypt/live/${public_ipv4}"
 live_cert="${live_dir}/fullchain.pem"
@@ -53,8 +65,14 @@ private_public_key="$(openssl pkey -in "$live_key" -pubout -outform DER 2>/dev/n
 systemctl is-enabled --quiet smart-gov-ip-cert-renew.timer || die "IP certificate renewal timer is not enabled."
 systemctl is-active --quiet smart-gov-ip-cert-renew.timer || die "IP certificate renewal timer is not active."
 
-"${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled
-require_current_release_images
+if [ "$upstream_port" = 18001 ]; then
+    "${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled \
+        --loopback-port 18001 --api-service api-candidate \
+        --worker-service material-worker-candidate
+else
+    "${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled
+    require_current_release_images
+fi
 
 target=/etc/nginx/sites-available/smart-gov-assistant.conf
 enabled=/etc/nginx/sites-enabled/smart-gov-assistant.conf
@@ -115,7 +133,9 @@ rollback_incomplete_cutover() {
     if [ "$status" -ne 0 ] && [ "$cutover_changed" = true ] && [ "$cutover_complete" = false ]; then
         restore_previous_nginx
         nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
-        rm -f "${STATE_DIR}/public-cutover-passed"
+        if [ "$upstream_port" = 18000 ]; then
+            rm -f "${STATE_DIR}/public-cutover-passed"
+        fi
         printf '[smart-gov] ERROR: IP HTTPS cutover was interrupted; prior Nginx state restoration was attempted.\n' >&2
     fi
     exit "$status"
@@ -136,7 +156,8 @@ verify_served_ip_certificate() {
 }
 
 temporary_target="$(mktemp /etc/nginx/sites-available/.smart-gov-assistant.conf.XXXXXX)"
-sed "s/__PUBLIC_IPV4__/${public_ipv4}/g" \
+sed -e "s/__PUBLIC_IPV4__/${public_ipv4}/g" \
+    -e "s/__UPSTREAM_PORT__/${upstream_port}/g" \
     "${PROJECT_ROOT}/deploy/nginx/smart-gov-ip-https.conf.template" >"$temporary_target"
 chmod 644 "$temporary_target"
 trap rollback_incomplete_cutover EXIT
@@ -154,13 +175,32 @@ if ! nginx -t || ! systemctl reload nginx || ! verify_served_ip_certificate; the
     die "IP HTTPS Nginx activation failed; complete prior Nginx state was restored."
 fi
 
-rm -f "${STATE_DIR}/public-cutover-passed"
-if ! "${SCRIPT_DIR}/verify-public-cutover.sh" \
-    --public-ipv4 "$public_ipv4" --public-base "https://${public_ipv4}"; then
+verification_ok=false
+if [ "$upstream_port" = 18001 ]; then
+    if "${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled \
+        --loopback-port 18001 --api-service api-candidate \
+        --worker-service material-worker-candidate \
+        --public-base "https://${public_ipv4}" &&
+        RELEASE_TAG="$current_release" bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" \
+            --base-url "https://${public_ipv4}" --through-nginx; then
+        verification_ok=true
+    fi
+else
+    rm -f "${STATE_DIR}/public-cutover-passed"
+    if "${SCRIPT_DIR}/verify-public-cutover.sh" \
+        --public-ipv4 "$public_ipv4" --public-base "https://${public_ipv4}" &&
+        bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" \
+            --base-url "https://${public_ipv4}" --through-nginx; then
+        verification_ok=true
+    fi
+fi
+if [ "$verification_ok" != true ]; then
     restore_previous_nginx
     nginx -t
     systemctl reload nginx
-    rm -f "${STATE_DIR}/public-cutover-passed"
+    if [ "$upstream_port" = 18000 ]; then
+        rm -f "${STATE_DIR}/public-cutover-passed"
+    fi
     die "Public HTTPS verification failed; complete prior Nginx state was restored."
 fi
 
@@ -169,6 +209,7 @@ temporary_marker="$(mktemp "${STATE_DIR}/.ip-nginx-cutover.XXXXXX")"
 {
     printf 'release_tag=%s\n' "$current_release"
     printf 'public_ipv4=%s\n' "$public_ipv4"
+    printf 'upstream_port=%s\n' "$upstream_port"
     printf 'backup_dir=%s\n' "$backup_dir"
     printf 'cutover_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } >"$temporary_marker"
@@ -177,4 +218,4 @@ mv -fT "$temporary_marker" "${STATE_DIR}/ip-nginx-cutover"
 temporary_marker=""
 cutover_complete=true
 trap - EXIT INT TERM
-log "Verified IP HTTPS traffic now targets release ${current_release} on 127.0.0.1:18000; legacy services remain online."
+log "Verified IP HTTPS traffic now targets release ${current_release} on 127.0.0.1:${upstream_port}; the other API remains online."

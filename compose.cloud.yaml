@@ -236,7 +236,21 @@ services:
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
       MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
       KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
       MAX_MATERIAL_BYTES: ${MAX_MATERIAL_BYTES:-10485760}
+      MATERIAL_DOCUMENTS_ENABLED: ${MATERIAL_DOCUMENTS_ENABLED:-true}
+      MATERIAL_TEMPLATE_SOURCE_PREFIX: ${MATERIAL_TEMPLATE_SOURCE_PREFIX:-material-templates/v1}
+      MATERIAL_TEMPLATE_MANIFEST_PATH: ${MATERIAL_TEMPLATE_MANIFEST_PATH:-resources/material_templates/v1/manifest.json}
+      MATERIAL_TEMPLATE_PROVIDER: ${MATERIAL_TEMPLATE_PROVIDER:-dashscope}
+      MATERIAL_TEMPLATE_MODEL: ${MATERIAL_TEMPLATE_MODEL:-qwen3-vl-flash-2026-01-22}
+      MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL: ${MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      GENERATED_DOCUMENTS_BUCKET: ${GENERATED_DOCUMENTS_BUCKET:-smart-gov-generated-documents}
+      MATERIAL_DOCUMENT_RETENTION_HOURS: ${MATERIAL_DOCUMENT_RETENTION_HOURS:-24}
+      MATERIAL_DOCUMENT_USER_DAILY_LIMIT: ${MATERIAL_DOCUMENT_USER_DAILY_LIMIT:-10}
+      MATERIAL_DOCUMENT_USER_ACTIVE_LIMIT: ${MATERIAL_DOCUMENT_USER_ACTIVE_LIMIT:-2}
+      MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT: ${MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT:-20}
+      MATERIAL_DOCUMENT_GLOBAL_QUEUE_LIMIT: ${MATERIAL_DOCUMENT_GLOBAL_QUEUE_LIMIT:-50}
+      MATERIAL_DOCUMENT_RELEASE_LANE: ${RELEASE_TAG:-dev}
       MCP_URL: ${MCP_URL:-http://mcp-server:3000/mcp}
       MCP_HEALTH_URL: ${MCP_HEALTH_URL:-http://mcp-server:3000/health}
       MOCK_GOV_API_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
@@ -247,10 +261,11 @@ services:
       CHAT_QUOTA_ANONYMOUS_DAILY: ${CHAT_QUOTA_ANONYMOUS_DAILY:-10}
       CHAT_QUOTA_AUTHENTICATED_DAILY: ${CHAT_QUOTA_AUTHENTICATED_DAILY:-30}
       CHAT_QUOTA_GLOBAL_DAILY: ${CHAT_QUOTA_GLOBAL_DAILY:-200}
+      CHAT_QUOTA_EXEMPT_SUBJECT_HASHES: ${CHAT_QUOTA_EXEMPT_SUBJECT_HASHES:-[]}
       DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-admin.demo}
       DEMO_STAFF_USERNAME: ${DEMO_STAFF_USERNAME:-staff.demo}
       LLM_MODE: ${LLM_MODE:-deepseek}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     secrets:
       - postgres_password
@@ -295,6 +310,67 @@ services:
     mem_reservation: 256m
     cpus: "1.5"
     pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+
+  material-worker:
+    <<: *service-defaults
+    image: smart-gov/material-worker:${RELEASE_TAG:-dev}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.material-worker
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "material-worker"]
+    user: "0:0"
+    environment:
+      ENVIRONMENT: demo
+      POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
+      POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MATERIAL_TEMPLATE_SOURCE_PREFIX: ${MATERIAL_TEMPLATE_SOURCE_PREFIX:-material-templates/v1}
+      MATERIAL_TEMPLATE_MANIFEST_PATH: ${MATERIAL_TEMPLATE_MANIFEST_PATH:-resources/material_templates/v1/manifest.json}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
+      GENERATED_DOCUMENTS_BUCKET: ${GENERATED_DOCUMENTS_BUCKET:-smart-gov-generated-documents}
+      MATERIAL_DOCUMENTS_ENABLED: ${MATERIAL_DOCUMENTS_ENABLED:-true}
+      MATERIAL_TEMPLATE_PROVIDER: ${MATERIAL_TEMPLATE_PROVIDER:-dashscope}
+      MATERIAL_TEMPLATE_MODEL: ${MATERIAL_TEMPLATE_MODEL:-qwen3-vl-flash-2026-01-22}
+      MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL: ${MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MATERIAL_TEMPLATE_DASHSCOPE_API_KEY_FILE: /run/secrets/vision_dashscope_api_key
+      MATERIAL_DOCUMENT_RETENTION_HOURS: ${MATERIAL_DOCUMENT_RETENTION_HOURS:-24}
+      MATERIAL_DOCUMENT_WORKER_POLL_SECONDS: ${MATERIAL_DOCUMENT_WORKER_POLL_SECONDS:-1.0}
+      MATERIAL_DOCUMENT_WORKER_LEASE_SECONDS: ${MATERIAL_DOCUMENT_WORKER_LEASE_SECONDS:-180}
+      MATERIAL_DOCUMENT_MODEL_TIMEOUT_SECONDS: ${MATERIAL_DOCUMENT_MODEL_TIMEOUT_SECONDS:-90}
+      MATERIAL_DOCUMENT_RELEASE_LANE: ${RELEASE_TAG:-dev}
+    secrets:
+      - postgres_password
+      - minio_root_user
+      - minio_root_password
+      - source: vision_dashscope_api_key
+        target: vision_dashscope_api_key
+        mode: 0400
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import time; p=Path('/tmp/material-worker.heartbeat'); raise SystemExit(0 if p.exists() and time.time()-p.stat().st_mtime < 30 else 1)"]
+      interval: 10s
+      start_period: 60s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      api:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    mem_limit: 1536m
+    mem_reservation: 384m
+    cpus: "1.0"
+    pids_limit: 384
     security_opt:
       - no-new-privileges:true
 
@@ -380,6 +456,7 @@ services:
     environment:
       MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
       KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
     volumes:
       - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
       - ${BACKUP_DIR:-./deploy/backups/UNSET}/minio:/backup
@@ -431,6 +508,8 @@ secrets:
     file: ./deploy/secrets/deepseek_api_key
   dashscope_api_key:
     file: ./deploy/secrets/dashscope_api_key
+  vision_dashscope_api_key:
+    file: ./deploy/secrets/vision_dashscope_api_key
 
 networks:
   app_net:

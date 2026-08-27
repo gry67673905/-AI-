@@ -19,13 +19,15 @@ import com.example.aicompanion.metastudio.business.DigitalHumanAvailability;
 import com.example.aicompanion.metastudio.model.DigitalHumanContract.NavigationIntent;
 import com.example.aicompanion.portal.PortalGraph;
 import com.example.aicompanion.portal.boundary.DocumentPickerBoundary;
+import com.example.aicompanion.portal.boundary.MaterialDocumentSaveBoundary;
 import com.example.aicompanion.portal.boundary.PortalJsBoundary;
 import com.example.aicompanion.portal.boundary.SecureWebViewHost;
+import com.example.aicompanion.portal.boundary.ServiceNavigationBoundary;
 import com.example.aicompanion.portal.boundary.TextToSpeechBoundary;
 import com.example.aicompanion.portal.boundary.VoiceCaptureBoundary;
-import com.example.aicompanion.portal.boundary.WindowMapBoundary;
 import com.example.aicompanion.portal.business.RoleNavigationPolicy;
 import com.example.aicompanion.portal.coordinator.PortalCoordinatorViewModel;
+import com.example.aicompanion.portal.model.PortalContract.ApiFailure;
 import com.example.aicompanion.portal.model.PortalContract.SelectedDocument;
 import com.example.aicompanion.portal.model.PortalContract.UiState;
 import com.example.aicompanion.web.SecureAssetWebViewClient;
@@ -47,9 +49,10 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
     private WebView portalWebView;
     private PortalCoordinatorViewModel viewModel;
     private DocumentPickerBoundary documentPicker;
+    private MaterialDocumentSaveBoundary materialDocumentSave;
     private VoiceCaptureBoundary voiceCapture;
     private TextToSpeechBoundary speechOutput;
-    private WindowMapBoundary windowMap;
+    private ServiceNavigationBoundary serviceNavigation;
     private UiState lastState;
     private boolean pageReady;
 
@@ -61,9 +64,12 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
         PortalGraph graph = PortalGraph.create(getApplicationContext());
         viewModel = new ViewModelProvider(this, graph.viewModelFactory()).get(PortalCoordinatorViewModel.class);
         documentPicker = new DocumentPickerBoundary(this, documentListener());
+        materialDocumentSave = new MaterialDocumentSaveBoundary(
+            this, graph.materialDocumentGateway(), savedInstanceState, materialDocumentListener()
+        );
         voiceCapture = new VoiceCaptureBoundary(this, voiceListener());
         speechOutput = new TextToSpeechBoundary(this);
-        windowMap = new WindowMapBoundary(this, graph.catalogGateway(), this::dispatchBoundaryError);
+        serviceNavigation = new ServiceNavigationBoundary(this, this::dispatchBoundaryError);
 
         portalWebView = findViewById(R.id.assistantWebView);
         configureDigitalHumanLaunch(findViewById(R.id.openDigitalHuman));
@@ -85,6 +91,10 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
         button.setOnClickListener(view -> {
             if (!enabled) {
                 dispatchBoundaryError("digital_human_unavailable", availability.getMessage());
+                return;
+            }
+            if (!viewModel.isSessionRestoreComplete()) {
+                dispatchBoundaryError("session_restoring", "正在恢复安全登录状态，请稍后再试");
                 return;
             }
             // MetaStudio/SIS exclusively owns the microphone and remote speech
@@ -140,8 +150,13 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
     }
 
     @Override
-    public void openWindowMap(String windowId) {
-        runOnUiThread(() -> windowMap.open(windowId));
+    public void openServiceNavigation(String serviceId) {
+        runOnUiThread(() -> serviceNavigation.open(serviceId));
+    }
+
+    @Override
+    public void saveGeneratedDocument(String generationId) {
+        runOnUiThread(() -> materialDocumentSave.save(generationId, viewModel.currentRole()));
     }
 
     private void onPageReady() {
@@ -152,6 +167,8 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
         ready.add("user", gson.toJsonTree(viewModel.currentUser()));
         ready.add("sections", gson.toJsonTree(navigationPolicy.sections(viewModel.currentRole())));
         ready.addProperty("max_material_bytes", 10L * 1024L * 1024L);
+        ready.addProperty("chat_session_id", viewModel.currentChatSessionId());
+        ready.addProperty("material_generation_id", viewModel.currentMaterialGenerationId());
         dispatch("onNativeReady", ready);
         if (lastState != null) dispatchState(lastState);
     }
@@ -208,6 +225,38 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
         };
     }
 
+    private MaterialDocumentSaveBoundary.Listener materialDocumentListener() {
+        return new MaterialDocumentSaveBoundary.Listener() {
+            @Override public void onPreparing() {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "material_document_preparing");
+                dispatch("onNativeAux", event);
+            }
+
+            @Override public void onSaved(String displayName, boolean opened) {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "material_document_saved");
+                event.addProperty("display_name", displayName);
+                event.addProperty("opened", opened);
+                dispatch("onNativeAux", event);
+            }
+
+            @Override public void onCancelled() {
+                JsonObject event = new JsonObject();
+                event.addProperty("type", "material_document_save_cancelled");
+                dispatch("onNativeAux", event);
+            }
+
+            @Override public void onAuthenticationRequired(ApiFailure error) {
+                viewModel.handleBoundaryApiFailure("MATERIAL_DOCUMENT_DOWNLOAD", error);
+            }
+
+            @Override public void onError(String code, String message) {
+                dispatchBoundaryError(code, message);
+            }
+        };
+    }
+
     private void dispatchBoundaryError(String code, String message) {
         runOnUiThread(() -> {
             JsonObject event = new JsonObject();
@@ -243,10 +292,17 @@ public final class MainActivity extends AppCompatActivity implements PortalJsBou
     }
 
     @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        if (materialDocumentSave != null) materialDocumentSave.saveState(outState);
+        super.onSaveInstanceState(outState);
+    }
+
+    @Override
     protected void onDestroy() {
         pageReady = false;
         if (voiceCapture != null) voiceCapture.destroy();
         if (speechOutput != null) speechOutput.destroy();
+        if (materialDocumentSave != null) materialDocumentSave.destroy(isChangingConfigurations());
         SecureWebViewHost.destroy(portalWebView);
         portalWebView = null;
         super.onDestroy();

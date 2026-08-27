@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ChatRequest(BaseModel):
@@ -39,9 +40,36 @@ class ToolCall(BaseModel):
     error: str | None = None
 
 
+class ChatUiCard(BaseModel):
+    """A fixed, URL-free action descriptor rendered by trusted client code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["MATERIAL_TEMPLATE"]
+    state: Literal[
+        "AVAILABLE",
+        "CONFIRMATION_REQUIRED",
+        "QUEUED",
+        "RUNNING",
+        "READY",
+        "FAILED",
+        "EXPIRED",
+    ]
+    title: str
+    notice: str
+    service_title: str | None = None
+    requirement_name: str | None = None
+    requires_confirmation: bool = False
+    intent_id: UUID | None = None
+    generation_id: UUID | None = None
+    expires_at: datetime | None = None
+
+
 class ChatResponse(BaseModel):
     request_id: UUID
     session_id: UUID
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
     answer: str
     sources: list[Source] = Field(default_factory=list)
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -49,8 +77,25 @@ class ChatResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     candidate_services: list[dict[str, Any]] = Field(default_factory=list)
     suggested_actions: list[dict[str, Any]] = Field(default_factory=list)
+    ui_cards: list[ChatUiCard] = Field(default_factory=list)
     clarification_required: bool = False
     handoff_status: str | None = None
+
+
+class ConsultationMessage(BaseModel):
+    id: UUID
+    request_id: UUID
+    role: Literal["user", "assistant"]
+    content: str
+    ui_cards: list[ChatUiCard] = Field(default_factory=list)
+    created_at: datetime
+
+
+class ConsultationMessagePage(BaseModel):
+    session_id: UUID
+    items: list[ConsultationMessage] = Field(default_factory=list)
+    next_before: UUID | None = None
+    has_more: bool = False
 
 
 class HealthCheck(BaseModel):

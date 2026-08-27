@@ -1,0 +1,18 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# Network-isolated material-worker candidate fallback. The deployment script
+# verifies requirements.material-worker.txt against the running canonical
+# worker image before this overlay is allowed, so only reviewed application,
+# migration and template resources are replaced.
+USER root
+WORKDIR /app
+
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY app ./app
+COPY resources ./resources
+
+USER app
+
+CMD ["python", "-m", "app.ops.material_document_worker"]

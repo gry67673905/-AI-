@@ -93,6 +93,7 @@ class AppServices:
             anonymous_daily=settings.chat_quota_anonymous_daily,
             authenticated_daily=settings.chat_quota_authenticated_daily,
             global_daily=settings.chat_quota_global_daily,
+            exempt_subject_hashes=settings.chat_quota_exempt_subject_hashes,
         )
         self.metastudio_session_quota = ChatQuota(
             settings.redis_url,
@@ -101,6 +102,7 @@ class AppServices:
             anonymous_daily=settings.metastudio_session_quota_anonymous_daily,
             authenticated_daily=settings.metastudio_session_quota_authenticated_daily,
             global_daily=settings.metastudio_session_quota_global_daily,
+            exempt_subject_hashes=settings.chat_quota_exempt_subject_hashes,
             key_namespace="metastudio-session",
             dependency_name="metastudio_session_quota",
             subject_message="今日数字人会话额度已用完，请明日再试",

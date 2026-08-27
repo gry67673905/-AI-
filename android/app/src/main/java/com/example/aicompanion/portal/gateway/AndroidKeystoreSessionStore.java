@@ -53,12 +53,12 @@ public final class AndroidKeystoreSessionStore implements SecureSessionStore {
                 StoredSession.class
             );
             if (stored == null || stored.secrets == null || !stored.secrets.isComplete()) {
-                clear();
+                clearCorruptedSession();
                 return Snapshot.empty();
             }
             return new Snapshot(stored.secrets, stored.profile);
         } catch (Exception ignored) {
-            clear();
+            clearCorruptedSession();
             return Snapshot.empty();
         }
     }
@@ -77,7 +77,10 @@ public final class AndroidKeystoreSessionStore implements SecureSessionStore {
             combined[0] = (byte) iv.length;
             System.arraycopy(iv, 0, combined, 1, iv.length);
             System.arraycopy(encrypted, 0, combined, 1 + iv.length, encrypted.length);
-            preferences.edit().putString(VALUE, Base64.encodeToString(combined, Base64.NO_WRAP)).apply();
+            boolean committed = preferences.edit()
+                .putString(VALUE, Base64.encodeToString(combined, Base64.NO_WRAP))
+                .commit();
+            if (!committed) throw new IllegalStateException("Encrypted session was not persisted");
         } catch (Exception error) {
             throw new IllegalStateException("无法安全保存登录会话", error);
         }
@@ -85,7 +88,15 @@ public final class AndroidKeystoreSessionStore implements SecureSessionStore {
 
     @Override
     public synchronized void clear() {
-        preferences.edit().remove(VALUE).apply();
+        if (!preferences.edit().remove(VALUE).commit()) {
+            throw new IllegalStateException("无法安全清除登录会话");
+        }
+    }
+
+    private void clearCorruptedSession() {
+        // A corrupt session is never usable; a failed best-effort removal must
+        // not turn an anonymous fallback into an application crash.
+        preferences.edit().remove(VALUE).commit();
     }
 
     private static SecretKey getOrCreateKey() throws Exception {

@@ -17,7 +17,8 @@ import java.io.ByteArrayInputStream;
 /** Serves bundled files and denies every non-appassets request or navigation. */
 public final class SecureAssetWebViewClient extends WebViewClient {
     public static final String APP_ORIGIN = "https://appassets.androidplatform.net";
-    public static final String START_URL = APP_ORIGIN + "/assets/index.html";
+    public static final String START_URL = APP_ORIGIN
+        + "/assets/index.html?v=portal-20260825-1";
 
     private final WebViewAssetLoader assetLoader;
     private final Runnable onPageReady;

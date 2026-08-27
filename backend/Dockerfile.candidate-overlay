@@ -1,0 +1,19 @@
+ARG BASE_IMAGE=python:3.13.7-slim-bookworm
+FROM ${BASE_IMAGE}
+
+# Network-isolated candidate fallback. The deployment script only uses this
+# image after proving that requirements.txt is byte-for-byte identical to the
+# running canonical API image, so the existing dependency layer can be reused
+# while the application and migration code are refreshed.
+USER root
+WORKDIR /app
+
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY app ./app
+COPY resources ./resources
+
+USER app
+EXPOSE 8000
+
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --ws-max-size 1100000 --no-access-log"]

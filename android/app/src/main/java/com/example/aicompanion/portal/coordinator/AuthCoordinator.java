@@ -13,6 +13,7 @@ public final class AuthCoordinator {
     public AuthCoordinator(AuthGateway gateway) { this.gateway = gateway; }
     public UserProfile restoredProfile() { return gateway.restoredProfile(); }
     public void restore(GatewayCallback<UserProfile> callback) { gateway.restore(callback); }
+    public void clearLocalSession() { gateway.clearLocalSession(); }
     public void execute(Command command, JsonObject payload, GatewayCallback<JsonElement> callback) {
         gateway.execute(command, payload, callback);
     }

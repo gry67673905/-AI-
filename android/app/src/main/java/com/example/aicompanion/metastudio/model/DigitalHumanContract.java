@@ -46,6 +46,34 @@ public final class DigitalHumanContract {
         }
     }
 
+    /**
+     * Native-only credential for the sparse visual-frame channel. It is intentionally separate
+     * from ClientSession so it can never be included in the MetaStudio WebMessage launch package.
+     */
+    public static final class VisionSession {
+        private final String visionSessionId;
+        private final String websocketUrl;
+        private final String visionToken;
+        private final String expiresAt;
+
+        public VisionSession(
+            String visionSessionId,
+            String websocketUrl,
+            String visionToken,
+            String expiresAt
+        ) {
+            this.visionSessionId = clean(visionSessionId);
+            this.websocketUrl = clean(websocketUrl);
+            this.visionToken = clean(visionToken);
+            this.expiresAt = clean(expiresAt);
+        }
+
+        public String getVisionSessionId() { return visionSessionId; }
+        public String getWebsocketUrl() { return websocketUrl; }
+        public String getVisionToken() { return visionToken; }
+        public String getExpiresAt() { return expiresAt; }
+    }
+
     public static final class SemanticIntent {
         private final String chatId;
         private final String intentId;

@@ -10,14 +10,14 @@ require_command nginx
 require_command curl
 require_cloud_files
 bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" --skip-http
-require_rag_cutover_ready
-require_cutover_smoke_ready
 
 domain="${SMART_GOV_DOMAIN:-}"
+upstream_port=18000
 confirm=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --domain) domain="${2:-}"; shift 2 ;;
+        --upstream-port) upstream_port="${2:-}"; shift 2 ;;
         --confirm-cutover) confirm=true; shift ;;
         *) die "Unknown Nginx activation option: $1" ;;
     esac
@@ -25,9 +25,21 @@ done
 
 [ "$confirm" = true ] || die "Refusing to switch traffic without --confirm-cutover."
 [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die "Invalid domain."
+validate_upstream_port "$upstream_port"
 [ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ] || die "TLS certificate is missing for ${domain}."
 
-"${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled
+if [ "$upstream_port" = 18001 ]; then
+    release_tag="$(candidate_release_tag)" ||
+        die "A validated candidate release marker is required for upstream 18001."
+    export RELEASE_TAG="$release_tag"
+    "${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled \
+        --loopback-port 18001 --api-service api-candidate \
+        --worker-service material-worker-candidate
+else
+    require_rag_cutover_ready
+    require_cutover_smoke_ready
+    "${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled
+fi
 
 target=/etc/nginx/sites-available/smart-gov-assistant.conf
 enabled=/etc/nginx/sites-enabled/smart-gov-assistant.conf
@@ -64,7 +76,8 @@ restore_previous_nginx() {
     fi
 }
 
-sed "s/__DOMAIN__/${domain}/g" \
+sed -e "s/__DOMAIN__/${domain}/g" \
+    -e "s/__UPSTREAM_PORT__/${upstream_port}/g" \
     "${PROJECT_ROOT}/deploy/nginx/smart-gov-https.conf.template" >"$target"
 chmod 644 "$target"
 ln -sfn "$target" "$enabled"
@@ -82,12 +95,22 @@ if ! systemctl reload nginx; then
     die "Nginx reload failed; the complete previous Nginx state was restored."
 fi
 
-if ! "${SCRIPT_DIR}/health-check.sh" --timeout 60 --public-base "https://${domain}"; then
+if [ "$upstream_port" = 18001 ]; then
+    public_health=("${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled
+        --loopback-port 18001 --api-service api-candidate
+        --worker-service material-worker-candidate --public-base "https://${domain}")
+else
+    public_health=("${SCRIPT_DIR}/health-check.sh" --timeout 60 --expect-rag enabled
+        --public-base "https://${domain}")
+fi
+if ! "${public_health[@]}" ||
+    ! bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" \
+        --base-url "https://${domain}" --through-nginx; then
     restore_previous_nginx
     nginx -t
     systemctl reload nginx
     die "Public HTTPS health failed; the complete previous Nginx state was restored."
 fi
 
-log "HTTPS traffic for ${domain} now targets 127.0.0.1:18000."
+log "HTTPS traffic for ${domain} now targets 127.0.0.1:${upstream_port}."
 log "Legacy systemd services are still running; retire them only with retire-legacy.sh."

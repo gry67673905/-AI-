@@ -61,12 +61,29 @@ public class DigitalHumanPoliciesTest {
         assertTrue(accepted.isAllowed());
         assertEquals("intent-1", accepted.getSemanticIntent().getIntentId());
         assertFalse(policy.validate(
+            "{\"event\":\"semantic_final\",\"chat_id\":\"chat-1\","
+                + "\"intent_id\":\"intent-1\",\"is_last\":true,\"text\":\"must-not-cross\"}"
+        ).isAllowed());
+        assertFalse(policy.validate(
             "{\"event\":\"semantic_final\",\"chat_id\":\"chat-1\",\"intent_id\":\"intent-1\",\"is_last\":false}"
         ).isAllowed());
         assertFalse(policy.validate(
             "{\"event\":\"semantic_final\",\"chat_id\":\"chat-1\",\"intent_id\":\"https://evil\",\"is_last\":true}"
         ).isAllowed());
+        assertFalse(policy.validate(
+            "{\"event\":\"speechRecognized\",\"chat_id\":\"chat-1\","
+                + "\"result_id\":1,\"is_last\":false,\"text\":\"private transcript\"}"
+        ).isAllowed());
+        assertFalse(policy.validate(
+            "{\"event\":\"speech_transcript\",\"text\":\"private transcript\"}"
+        ).isAllowed());
         assertFalse(policy.validate("{\"event\":\"execute_native\"}").isAllowed());
+        assertFalse(policy.validate(
+            "{\"event\":\"page_ready\",\"text\":\"must-not-cross\"}"
+        ).isAllowed());
+        assertFalse(policy.validate(
+            "{\"event\":\"close\",\"url\":\"https://evil.example\"}"
+        ).isAllowed());
     }
 
     @Test
@@ -87,6 +104,15 @@ public class DigitalHumanPoliciesTest {
         ).isAllowed());
         assertTrue(policy.validate(
             "{\"event\":\"sdk_status\",\"status\":\"sdk_error_mss_47015028\"}"
+        ).isAllowed());
+        assertTrue(policy.validate(
+            "{\"event\":\"sdk_status\",\"status\":\"asr_partial\"}"
+        ).isAllowed());
+        assertTrue(policy.validate(
+            "{\"event\":\"sdk_status\",\"status\":\"asr_final\"}"
+        ).isAllowed());
+        assertTrue(policy.validate(
+            "{\"event\":\"sdk_status\",\"status\":\"answering\"}"
         ).isAllowed());
         assertFalse(policy.validate(
             "{\"event\":\"sdk_status\",\"status\":\"sdk_error_12345678\"}"
@@ -200,6 +226,35 @@ public class DigitalHumanPoliciesTest {
         assertFalse(policy.validate(response, "intent-1", Role.CITIZEN).isAllowed());
         response.addProperty("requires_confirmation", true);
         assertFalse(policy.validate(response, "different-intent", Role.CITIZEN).isAllowed());
+    }
+
+    @Test
+    public void serviceNavigationIntentAllowsAnonymousButOnlyExactServiceUuidPrefill() {
+        DigitalHumanActionPolicy policy = new DigitalHumanActionPolicy();
+        JsonObject response = new JsonObject();
+        response.addProperty("intent_id", "intent-nav");
+        response.addProperty("type", "OPEN_SERVICE_NAVIGATION");
+        response.addProperty("label", "前往最近服务网点");
+        response.addProperty("section", "services");
+        response.addProperty("requires_confirmation", true);
+        JsonObject prefill = new JsonObject();
+        prefill.addProperty("service_id", "11111111-1111-4111-8111-111111111111");
+        response.add("prefill", prefill);
+
+        for (Role role : new Role[]{Role.ANONYMOUS, Role.CITIZEN, Role.STAFF, Role.ADMIN}) {
+            DigitalHumanActionPolicy.Decision accepted = policy.validate(response, "intent-nav", role);
+            assertTrue(role.name(), accepted.isAllowed());
+            assertEquals(1, accepted.getIntent().getPrefill().size());
+        }
+
+        prefill.addProperty("window_id", "11111111-1111-4111-8111-111111111112");
+        assertFalse(policy.validate(response, "intent-nav", Role.ANONYMOUS).isAllowed());
+        prefill.remove("window_id");
+        prefill.addProperty("service_id", "svc-1");
+        assertFalse(policy.validate(response, "intent-nav", Role.ANONYMOUS).isAllowed());
+        prefill.addProperty("service_id", "11111111-1111-4111-8111-111111111111");
+        response.addProperty("section", "login");
+        assertFalse(policy.validate(response, "intent-nav", Role.ANONYMOUS).isAllowed());
     }
 
     @Test

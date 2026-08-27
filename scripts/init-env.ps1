@@ -21,6 +21,48 @@ function New-LocalSecret {
     return -join ($bytes | ForEach-Object { $_.ToString("x2") })
 }
 
+function Get-QwenVisionSettings {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    $apiKey = ""
+    $baseUrl = ""
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -match '^\s*Qwen3-vl-flash\s+key\s*[：:=]\s*(.+?)\s*$') {
+            $apiKey = $Matches[1].Trim().Trim('"').Trim("'")
+        } elseif ($line -match '^\s*Qwen3-vl-flash\s+url\s*[：:=]\s*(.+?)\s*$') {
+            $baseUrl = $Matches[1].Trim().Trim('"').Trim("'").TrimEnd('/')
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($apiKey) -and [string]::IsNullOrWhiteSpace($baseUrl)) {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($apiKey) -or [string]::IsNullOrWhiteSpace($baseUrl)) {
+        throw "Qwen3-vl-flash key and url must both be present. No secret values were printed."
+    }
+    if ($apiKey.Length -lt 20 -or $apiKey.Length -gt 4096 -or $apiKey -notmatch '^[\x21-\x7e]+$') {
+        throw "Qwen3-vl-flash key has an invalid format. No secret values were printed."
+    }
+    $parsedUrl = $null
+    if (-not [Uri]::TryCreate($baseUrl, [UriKind]::Absolute, [ref]$parsedUrl) `
+        -or $parsedUrl.Scheme -ne 'https' `
+        -or $parsedUrl.Host -ne 'dashscope.aliyuncs.com' `
+        -or $parsedUrl.AbsolutePath.TrimEnd('/') -ne '/compatible-mode/v1' `
+        -or -not [string]::IsNullOrEmpty($parsedUrl.Query) `
+        -or -not [string]::IsNullOrEmpty($parsedUrl.Fragment) `
+        -or -not [string]::IsNullOrEmpty($parsedUrl.UserInfo)) {
+        throw "Qwen3-vl-flash url must be the fixed DashScope HTTPS base URL."
+    }
+    return [pscustomobject]@{
+        ApiKey = $apiKey
+        BaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    }
+}
+
+$qwenVision = Get-QwenVisionSettings -Path $KeyListPath
+
 if (Test-Path -LiteralPath $envPath) {
     $existingLines = @(Get-Content -LiteralPath $envPath)
     $existingNames = @(
@@ -34,6 +76,9 @@ if (Test-Path -LiteralPath $envPath) {
     }
     if ($existingNames -notcontains "MINIO_ROOT_PASSWORD") {
         $missingValues += "MINIO_ROOT_PASSWORD=$(New-LocalSecret)"
+    }
+    if ($null -ne $qwenVision -and $existingNames -notcontains "VISION_DASHSCOPE_API_KEY") {
+        $missingValues += "VISION_DASHSCOPE_API_KEY=$($qwenVision.ApiKey)"
     }
     $requiredLocalValues = [ordered]@{
         MINIO_ENDPOINT = "http://minio:9000"
@@ -53,6 +98,11 @@ if (Test-Path -LiteralPath $envPath) {
         DEMO_STAFF_PASSWORD = "DemoS!$(New-LocalSecret)"
         MCP_SESSION_TTL_MS = "900000"
         MCP_MAX_SESSIONS = "128"
+        VISION_ENABLED = "true"
+        VISION_PROVIDER = $(if ($null -ne $qwenVision) { "dashscope" } else { "mock" })
+        VISION_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        VISION_TURN_CLOSE_WAIT_MS = "2000"
+        VISION_ANALYSIS_GLOBAL_DAILY = "20"
     }
     foreach ($entry in $requiredLocalValues.GetEnumerator()) {
         $hasLegacyMaterialLimit = $entry.Key -eq "MAX_MATERIAL_BYTES" -and $existingNames -contains "MAX_UPLOAD_BYTES"
@@ -69,6 +119,22 @@ if (Test-Path -LiteralPath $envPath) {
             } elseif ($_ -like "MAX_UPLOAD_BYTES=*") {
                 $settingsUpgraded = $true
                 $_ -replace '^MAX_UPLOAD_BYTES=', 'MAX_MATERIAL_BYTES='
+            } elseif ($null -ne $qwenVision -and $_ -like "VISION_ENABLED=*") {
+                $expectedValue = "VISION_ENABLED=true"
+                $settingsUpgraded = $settingsUpgraded -or $_ -ne $expectedValue
+                $expectedValue
+            } elseif ($null -ne $qwenVision -and $_ -like "VISION_PROVIDER=*") {
+                $expectedValue = "VISION_PROVIDER=dashscope"
+                $settingsUpgraded = $settingsUpgraded -or $_ -ne $expectedValue
+                $expectedValue
+            } elseif ($null -ne $qwenVision -and $_ -like "VISION_DASHSCOPE_API_KEY=*") {
+                $expectedValue = "VISION_DASHSCOPE_API_KEY=$($qwenVision.ApiKey)"
+                $settingsUpgraded = $settingsUpgraded -or $_ -ne $expectedValue
+                $expectedValue
+            } elseif ($null -ne $qwenVision -and $_ -like "VISION_DASHSCOPE_BASE_URL=*") {
+                $expectedValue = "VISION_DASHSCOPE_BASE_URL=$($qwenVision.BaseUrl)"
+                $settingsUpgraded = $settingsUpgraded -or $_ -ne $expectedValue
+                $expectedValue
             } else {
                 $_
             }
@@ -146,11 +212,19 @@ $content = @(
     "GOV_API_BASE_URL=http://mock-gov-api:8080"
     "GOV_API_TOKEN=$govApiToken"
     "LLM_MODE=deepseek"
-    "LLM_MODEL=deepseek-chat"
+    "LLM_MODEL=deepseek-v4-flash"
     "DEEPSEEK_API_KEY=$deepSeekKey"
-    "LOG_LEVEL=INFO"
+    "VISION_ENABLED=true"
+    "VISION_PROVIDER=$(if ($null -ne $qwenVision) { 'dashscope' } else { 'mock' })"
+    "VISION_DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1"
+    "VISION_TURN_CLOSE_WAIT_MS=2000"
+    "VISION_ANALYSIS_GLOBAL_DAILY=20"
 )
+if ($null -ne $qwenVision) {
+    $content += "VISION_DASHSCOPE_API_KEY=$($qwenVision.ApiKey)"
+}
+$content += "LOG_LEVEL=INFO"
 
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllLines($envPath, $content, $utf8WithoutBom)
-Write-Host "Local .env created. DeepSeek key loaded; values were not displayed."
+Write-Host "Local .env created. Configured model credentials were loaded without displaying values."

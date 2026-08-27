@@ -7,9 +7,11 @@ source "${SCRIPT_DIR}/lib.sh"
 
 require_root
 require_command docker
+require_command sha256sum
 require_cloud_files
 require_secrets
 require_metastudio_config
+require_material_documents_config
 bash "${SCRIPT_DIR}/verify-metastudio-smoke.sh" --skip-http
 
 domain="${SMART_GOV_DOMAIN:-}"
@@ -62,12 +64,56 @@ if cloud_compose ps --status running --services 2>/dev/null | grep -Fxq api; the
 fi
 
 export RELEASE_TAG="$release_tag"
-log "Building immutable application images for release ${release_tag}."
-cloud_compose build --pull api mcp-server mock-gov-api
-cloud_compose up -d --remove-orphans \
-    postgres redis etcd minio milvus mock-gov-api mcp-server api
+promoting_candidate=false
+candidate_marker="${STATE_DIR}/candidate-release"
+if [ -e "$candidate_marker" ]; then
+    candidate_tag="$(candidate_release_tag)" ||
+        die "Candidate release marker is invalid; stop the candidate before deploying."
+    [ "$candidate_tag" = "$release_tag" ] ||
+        die "Active candidate ${candidate_tag} cannot be promoted as ${release_tag}."
 
-"${SCRIPT_DIR}/health-check.sh" --timeout "$health_timeout" --expect-rag "$expected_rag"
+    marker_api_id="$(awk -F= '$1 == "image_id" {print $2}' "$candidate_marker")"
+    marker_worker_id="$(awk -F= '$1 == "worker_image_id" {print $2}' "$candidate_marker")"
+    marker_bundle_sha256="$(awk -F= '$1 == "deployment_bundle_sha256" {print $2}' "$candidate_marker")"
+    [[ "$marker_api_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+        die "Candidate API image ID is missing or invalid."
+    [[ "$marker_worker_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+        die "Candidate worker image ID is missing or invalid."
+    [[ "$marker_bundle_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+        die "Candidate deployment bundle digest is missing or invalid."
+    current_api_id="$(docker image inspect --format '{{.Id}}' "smart-gov/api:${release_tag}" 2>/dev/null)" ||
+        die "Validated candidate API image is unavailable."
+    current_worker_id="$(docker image inspect --format '{{.Id}}' "smart-gov/material-worker:${release_tag}" 2>/dev/null)" ||
+        die "Validated candidate worker image is unavailable."
+    [ "$current_api_id" = "$marker_api_id" ] ||
+        die "Candidate API tag no longer points to the validated image."
+    [ "$current_worker_id" = "$marker_worker_id" ] ||
+        die "Candidate worker tag no longer points to the validated image."
+    current_bundle_sha256="$(deployment_bundle_sha256)"
+    [ "$current_bundle_sha256" = "$marker_bundle_sha256" ] ||
+        die "Deployment configuration, bind-mounted entrypoint or secrets changed after candidate validation."
+    promoting_candidate=true
+    log "Promoting the already validated candidate API and worker images for ${release_tag}."
+fi
+
+if [ "$promoting_candidate" = true ]; then
+    # API and worker must remain byte-for-byte identical to the candidate that
+    # passed health and smoke checks. Rebuilding their mutable tags here would
+    # let unvalidated code share the candidate's queue lane.
+    cloud_compose build --pull mcp-server mock-gov-api
+else
+    log "Building immutable application images for release ${release_tag}."
+    cloud_compose build --pull api material-worker mcp-server mock-gov-api
+fi
+# A validated api-candidate may be carrying public traffic while the canonical
+# 18000 service is promoted. Never use --remove-orphans here: this compose
+# view intentionally omits the candidate profile and would otherwise delete
+# the live candidate before the final Nginx switch.
+cloud_compose up -d \
+    postgres redis etcd minio milvus mock-gov-api mcp-server api material-worker
+
+"${SCRIPT_DIR}/health-check.sh" --timeout "$health_timeout" --expect-rag "$expected_rag" \
+    --worker-service material-worker
 
 release_dir="${RELEASES_DIR}/${release_tag}"
 mkdir -p "$release_dir"

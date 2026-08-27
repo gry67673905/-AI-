@@ -154,7 +154,13 @@ if metastudio_enabled; then
         metastudio_huawei_secret_key METASTUDIO_HUAWEI_SECRET_KEY_FILE \
         "Huawei Cloud IAM secret key"
 fi
+if metastudio_enabled || material_documents_enabled; then
+    install_required_external_secret \
+        vision_dashscope_api_key VISION_DASHSCOPE_API_KEY_FILE \
+        "Independent DashScope key for Qwen vision and material templates"
+fi
 
 require_metastudio_config
+require_material_documents_config
 require_secrets
 log "Cloud Docker secrets are ready; no secret value was displayed."

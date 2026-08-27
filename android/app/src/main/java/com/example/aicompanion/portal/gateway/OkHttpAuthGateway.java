@@ -26,6 +26,11 @@ public final class OkHttpAuthGateway implements AuthGateway {
     }
 
     @Override
+    public void clearLocalSession() {
+        store.clear();
+    }
+
+    @Override
     public void restore(GatewayCallback<UserProfile> callback) {
         SecureSessionStore.Snapshot snapshot = store.load();
         if (!snapshot.isAuthenticated()) {
@@ -44,7 +49,19 @@ public final class OkHttpAuthGateway implements AuthGateway {
                         requestMe(refreshed.getProfile(), callback);
                     }
                     @Override public void onError(ApiFailure refreshError) {
-                        store.clear();
+                        SecureSessionStore.Snapshot current = store.load();
+                        if (current.isAuthenticated() && !sameRefreshToken(snapshot, current)) {
+                            // Another native process completed refresh first. Its newer session
+                            // wins; never erase it because this process used the superseded token.
+                            requestMe(current.getProfile(), callback);
+                            return;
+                        }
+                        if (!isDefinitiveRefreshFailure(refreshError)) {
+                            // A temporary provider/network failure must not destroy a valid
+                            // encrypted login. Keep the last known native profile offline.
+                            callback.onSuccess(snapshot.getProfile());
+                            return;
+                        }
                         callback.onSuccess(UserProfile.anonymous());
                     }
                 });
@@ -129,6 +146,27 @@ public final class OkHttpAuthGateway implements AuthGateway {
     }
 
     private void refresh(SecureSessionStore.Snapshot snapshot, GatewayCallback<SecureSessionStore.Snapshot> callback) {
+        CoordinatedSecureSessionStore coordinated = store instanceof CoordinatedSecureSessionStore
+            ? (CoordinatedSecureSessionStore) store : null;
+        CoordinatedSecureSessionStore.RefreshLease lease = null;
+        if (coordinated != null) {
+            try {
+                lease = coordinated.acquireRefresh(snapshot);
+                if (!lease.isOwner()) {
+                    SecureSessionStore.Snapshot current = lease.getSnapshot();
+                    if (current.isAuthenticated()) {
+                        callback.onSuccess(current);
+                    } else {
+                        callback.onError(new ApiFailure(401, "authentication_required", "请重新登录"));
+                    }
+                    return;
+                }
+            } catch (RuntimeException unavailable) {
+                callback.onError(new ApiFailure(503, "session_unavailable", "安全登录状态暂时不可用"));
+                return;
+            }
+        }
+        final CoordinatedSecureSessionStore.RefreshLease ownedLease = lease;
         JsonObject body = new JsonObject();
         body.addProperty("refresh_token", snapshot.getSecrets().getRefreshToken());
         api.execute(NativeApiClient.Action.POST, new String[]{"auth", "refresh"}, Collections.emptyMap(),
@@ -139,15 +177,49 @@ public final class OkHttpAuthGateway implements AuthGateway {
                     String refreshToken = GatewayPayload.string(root, "refresh_token");
                     if (refreshToken.isEmpty()) refreshToken = snapshot.getSecrets().getRefreshToken();
                     if (access.isEmpty()) {
-                        callback.onError(new ApiFailure(502, "invalid_auth_response", "刷新响应缺少访问令牌"));
+                        ApiFailure invalid = new ApiFailure(
+                            502, "invalid_auth_response", "刷新响应缺少访问令牌"
+                        );
+                        releaseFailedRefresh(coordinated, ownedLease, invalid);
+                        callback.onError(invalid);
                         return;
                     }
                     SessionSecrets secrets = new SessionSecrets(access, refreshToken, GatewayPayload.string(root, "token_type"));
-                    store.save(secrets, snapshot.getProfile());
-                    callback.onSuccess(new SecureSessionStore.Snapshot(secrets, snapshot.getProfile()));
+                    try {
+                        SecureSessionStore.Snapshot saved;
+                        if (coordinated != null) {
+                            saved = coordinated.completeRefresh(
+                                ownedLease, secrets, snapshot.getProfile()
+                            );
+                        } else {
+                            store.save(secrets, snapshot.getProfile());
+                            saved = new SecureSessionStore.Snapshot(secrets, snapshot.getProfile());
+                        }
+                        callback.onSuccess(saved);
+                    } catch (RuntimeException unavailable) {
+                        callback.onError(new ApiFailure(
+                            503, "session_unavailable", "无法安全保存刷新后的登录状态"
+                        ));
+                    }
                 }
-                @Override public void onError(ApiFailure error) { callback.onError(error); }
+                @Override public void onError(ApiFailure error) {
+                    releaseFailedRefresh(coordinated, ownedLease, error);
+                    callback.onError(error);
+                }
             });
+    }
+
+    private void releaseFailedRefresh(
+        CoordinatedSecureSessionStore coordinated,
+        CoordinatedSecureSessionStore.RefreshLease lease,
+        ApiFailure error
+    ) {
+        boolean invalidate = isDefinitiveRefreshFailure(error);
+        if (coordinated != null && lease != null && lease.isOwner()) {
+            coordinated.failRefresh(lease, invalidate);
+        } else if (invalidate) {
+            store.clear();
+        }
     }
 
     private void logout(GatewayCallback<JsonElement> callback) {
@@ -186,6 +258,23 @@ public final class OkHttpAuthGateway implements AuthGateway {
             role.isEmpty() ? fallback.getRole() : Role.fromWire(role),
             applicant.isEmpty() ? fallback.getApplicantType() : ApplicantType.fromWire(applicant)
         );
+    }
+
+    private static boolean sameRefreshToken(
+        SecureSessionStore.Snapshot first,
+        SecureSessionStore.Snapshot second
+    ) {
+        if (!first.isAuthenticated() || !second.isAuthenticated()) return false;
+        byte[] left = first.getSecrets().getRefreshToken()
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] right = second.getSecrets().getRefreshToken()
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return java.security.MessageDigest.isEqual(left, right);
+    }
+
+    private static boolean isDefinitiveRefreshFailure(ApiFailure error) {
+        if (error == null) return false;
+        return error.getStatusCode() == 400 || error.getStatusCode() == 401;
     }
 
     private static String first(JsonObject object, String... keys) {

@@ -10,9 +10,13 @@ from app.domain.enums import (
     AppointmentStatus,
     ApplicationStatus,
     DeliveryStatus,
+    ConsultationMaterialIntentStatus,
     DigitalHumanIntentStatus,
     HandoffStatus,
     KnowledgeStatus,
+    MaterialDocumentScope,
+    MaterialDocumentStatus,
+    MaterialTemplateMode,
     PaymentStatus,
     Role,
     ServiceStatus,
@@ -87,6 +91,64 @@ class MaterialRequirement:
     required: bool
     condition: dict[str, Any] | None = None
     accepted_types: tuple[str, ...] = ("application/pdf", "image/jpeg", "image/png")
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialTemplate:
+    id: UUID
+    service_code: str
+    requirement_code: str
+    template_key: str
+    title: str
+    mode: MaterialTemplateMode
+    source_object_key: str | None
+    source_sha256: str | None
+    allowed_fields: tuple[str, ...]
+    notice: str
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialDocumentJob:
+    id: UUID
+    owner_account_id: UUID
+    application_id: UUID | None
+    template_id: UUID
+    requirement_code: str
+    template_key: str
+    template_version: int
+    template_title: str
+    template_mode: MaterialTemplateMode
+    allowed_fields: tuple[str, ...]
+    status: MaterialDocumentStatus
+    form_snapshot: dict[str, Any] | None
+    request_text: str | None
+    lease_token: UUID | None
+    source_object_key: str | None
+    source_sha256: str | None
+    model_name: str
+    output_object_key: str | None
+    expires_at: datetime
+    scope: MaterialDocumentScope = MaterialDocumentScope.APPLICATION
+    consultation_session_id: UUID | None = None
+    consultation_intent_id: UUID | None = None
+    service_id: UUID | None = None
+    service_version_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConsultationMaterialIntent:
+    id: UUID
+    owner_account_id: UUID
+    session_id: UUID
+    service_id: UUID
+    service_version_id: UUID
+    material_requirement_id: UUID
+    template_id: UUID
+    requirement_code: str
+    status: ConsultationMaterialIntentStatus
+    expires_at: datetime
+    confirmed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -97,3 +97,27 @@ class EligibilityOutcome(StrEnum):
     ELIGIBLE = "ELIGIBLE"
     INELIGIBLE = "INELIGIBLE"
     NEEDS_INFORMATION = "NEEDS_INFORMATION"
+
+
+class MaterialTemplateMode(StrEnum):
+    SOURCE_EDITABLE = "SOURCE_EDITABLE"
+    VISUAL_RECONSTRUCT = "VISUAL_RECONSTRUCT"
+    NOT_GENERATABLE = "NOT_GENERATABLE"
+
+
+class MaterialDocumentStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    READY = "READY"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+
+
+class MaterialDocumentScope(StrEnum):
+    APPLICATION = "APPLICATION"
+    CONSULTATION = "CONSULTATION"
+
+
+class ConsultationMaterialIntentStatus(StrEnum):
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"

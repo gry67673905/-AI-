@@ -1,0 +1,9 @@
+argon2-cffi==25.1.0
+asyncpg==0.31.0
+httpx==0.28.1
+minio==7.2.20
+pydantic==2.13.4
+pydantic-settings==2.15.0
+PyJWT==2.10.1
+python-docx==1.2.0
+SQLAlchemy==2.0.52

@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol
 from uuid import UUID
 
-from app.application.dtos import Principal, SourceData, ToolCallData
+from app.application.dtos import (
+    ChatUiCardData,
+    ConversationMessageData,
+    DocumentContextData,
+    DocumentFrameData,
+    NavigationCatalogRowData,
+    Principal,
+    SourceData,
+    ToolCallData,
+    VisualContextData,
+    VisionFrameData,
+    VisionTurnSnapshotData,
+    VisionTicketClaimsData,
+)
 from app.application.rag_dtos import (
     CorpusArchiveData,
     CorpusChunkData,
@@ -67,6 +81,13 @@ class BusinessRepositoryPort(Protocol):
     async def list_departments(self) -> list[dict[str, Any]]: ...
     async def create_window(self, actor_id: UUID, values: dict[str, Any]) -> dict[str, Any]: ...
     async def list_windows(self, department_id: UUID | None = None) -> list[dict[str, Any]]: ...
+    async def get_navigation_options(self, service_id: UUID) -> dict[str, Any]: ...
+    async def import_navigation_catalog(
+        self,
+        actor_id: UUID,
+        rows: tuple[NavigationCatalogRowData, ...],
+        dry_run: bool,
+    ) -> dict[str, Any]: ...
     async def create_staff_account(
         self, actor_id: UUID, username: str, password_hash: str,
         display_name: str, department_id: UUID, window_id: UUID | None,
@@ -82,6 +103,48 @@ class BusinessRepositoryPort(Protocol):
     async def list_audits(self, limit: int = 100) -> list[dict[str, Any]]: ...
     async def metrics(self) -> dict[str, int]: ...
     async def get_material_entities(self, service_id: UUID) -> tuple[dict[str, Any], list[Any]]: ...
+    async def list_material_template_options(
+        self, application_id: UUID, owner_account_id: UUID
+    ) -> list[dict[str, Any]]: ...
+    async def list_consultation_material_template_options(
+        self, service_id: UUID | None = None, query: str | None = None
+    ) -> list[dict[str, Any]]: ...
+    async def search_consultation_material_template_options(
+        self, query: str
+    ) -> list[dict[str, Any]]: ...
+    async def create_consultation_material_intent(
+        self,
+        owner_account_id: UUID,
+        session_id: UUID,
+        service_id: UUID,
+        requirement_code: str,
+        template_id: UUID,
+        request_text: str | None,
+        expires_at: datetime,
+    ) -> dict[str, Any]: ...
+    async def get_consultation_material_intent_states(
+        self,
+        owner_account_id: UUID,
+        session_id: UUID,
+        intent_ids: tuple[UUID, ...],
+        now: datetime,
+    ) -> dict[UUID, dict[str, Any]]: ...
+    async def get_latest_pending_consultation_material_intent(
+        self, owner_account_id: UUID, session_id: UUID, now: datetime
+    ) -> dict[str, Any] | None: ...
+    async def confirm_consultation_material_intent(
+        self,
+        owner_account_id: UUID,
+        session_id: UUID,
+        intent_id: UUID,
+        job_expires_at: datetime,
+        model_name: str,
+        release_lane: str,
+        user_daily_limit: int,
+        user_active_limit: int,
+        global_daily_limit: int,
+        global_queue_limit: int,
+    ) -> dict[str, Any]: ...
     async def get_application_case_authorized(self, application_id: UUID, actor_id: UUID, role: Role, department_id: UUID | None = None) -> dict[str, Any]: ...
     async def get_application_view_authorized(self, application_id: UUID, actor_id: UUID, role: Role, department_id: UUID | None = None) -> dict[str, Any]: ...
     async def create_application(self, actor_id: UUID, service_id: UUID, form_data: dict[str, Any]) -> dict[str, Any]: ...
@@ -149,17 +212,20 @@ class BusinessRepositoryPort(Protocol):
     async def consume_digital_human_intent(
         self,
         intent_id: UUID,
-        actor_id: UUID,
-        actor_role: Role,
+        actor_id: UUID | None,
+        actor_role: Role | None,
         client_session_id: UUID,
         client_chat_id_hash: str,
         now: datetime,
+        required_intent_type: str | None = None,
     ) -> dict[str, Any]: ...
 
 
 class ObjectStorePort(Protocol):
     materials_bucket: str
     knowledge_bucket: str
+    material_templates_bucket: str
+    generated_documents_bucket: str
 
     async def ensure_buckets(self) -> None: ...
     async def ping(self) -> None: ...
@@ -197,7 +263,7 @@ class ChatPersistencePort(Protocol):
         request_id: UUID,
         message: str,
         owner_account_id: UUID | None = None,
-    ) -> None: ...
+    ) -> UUID | None: ...
 
     async def save_assistant_result(
         self,
@@ -208,7 +274,24 @@ class ChatPersistencePort(Protocol):
         tool_calls: list[ToolCallData],
         cache_hit: bool,
         warnings: list[str],
-    ) -> None: ...
+        ui_cards: list[ChatUiCardData] | None = None,
+    ) -> UUID | None: ...
+
+    async def load_recent_history(
+        self,
+        session_id: UUID,
+        owner_account_id: UUID | None,
+        limit: int = 8,
+    ) -> tuple[ConversationMessageData, ...]: ...
+
+    async def list_messages_authorized(
+        self,
+        session_id: UUID,
+        owner_account_id: UUID,
+        *,
+        before: UUID | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]: ...
 
 
 class PublicRetrievalCachePort(Protocol):
@@ -265,6 +348,116 @@ class MetaStudioSessionPort(Protocol):
     async def put(self, session_id: UUID, values: dict[str, Any], ttl_seconds: int) -> None: ...
     async def get(self, session_id: UUID) -> dict[str, Any] | None: ...
     async def claim_replay(self, replay_key: str, ttl_seconds: int) -> bool: ...
+
+
+class VisionTicketPort(Protocol):
+    async def issue(
+        self, claims: VisionTicketClaimsData, ttl_seconds: int
+    ) -> str: ...
+
+    async def consume(self, token: str) -> VisionTicketClaimsData | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class VisionEventData:
+    """Provider-neutral fact emitted by a fast, single-frame vision stage.
+
+    The event deliberately contains no image bytes. ``attributes`` is a tuple
+    rather than an arbitrary mapping so timeline entries stay immutable,
+    bounded, and straightforward to validate at adapter boundaries.
+    """
+
+    kind: Literal["quality", "object", "track", "action", "ocr"]
+    label: str
+    confidence: float
+    frame_sequence: int
+    observed_at_ms: int
+    track_id: str | None = None
+    attributes: tuple[tuple[str, str], ...] = ()
+
+
+class VisionFastAnalyzerPort(Protocol):
+    async def analyze_frame(
+        self, frame: VisionFrameData
+    ) -> tuple[VisionEventData, ...]: ...
+
+
+class VisionFrameStorePort(Protocol):
+    async def cleanup_expired(self) -> None: ...
+
+    async def register_session(
+        self, client_session_id: UUID, vision_session_id: UUID
+    ) -> bool: ...
+
+    async def put(self, frame: VisionFrameData) -> str: ...
+
+    async def append_events(
+        self, frame: VisionFrameData, events: tuple[VisionEventData, ...]
+    ) -> None: ...
+
+    async def timeline_context(
+        self,
+        client_session_id: UUID,
+        vision_session_id: UUID,
+        turn_sequence: int,
+        frame_count: int,
+    ) -> VisualContextData | None: ...
+
+    async def remember_late_context(
+        self, context: VisualContextData, ttl_seconds: int
+    ) -> None: ...
+
+    async def pop_late_context(
+        self, client_session_id: UUID
+    ) -> VisualContextData | None: ...
+
+    async def pop_latest_turn(
+        self,
+        client_session_id: UUID,
+        expected_vision_session_id: UUID | None = None,
+    ) -> VisionTurnSnapshotData: ...
+
+    async def start_turn(
+        self,
+        client_session_id: UUID,
+        vision_session_id: UUID,
+        turn_sequence: int,
+    ) -> bool: ...
+
+    async def end_turn(
+        self,
+        client_session_id: UUID,
+        vision_session_id: UUID,
+        turn_sequence: int,
+    ) -> bool: ...
+
+    async def discard_session(
+        self,
+        client_session_id: UUID,
+        vision_session_id: UUID,
+        *,
+        mark_unavailable: bool = False,
+    ) -> None: ...
+
+    async def invalidate_session(
+        self, client_session_id: UUID, vision_session_id: UUID
+    ) -> None: ...
+
+
+class VisionAnalyzerPort(Protocol):
+    async def analyze(
+        self, sanitized_question: str, frames: tuple[VisionFrameData, ...]
+    ) -> VisualContextData: ...
+
+    async def analyze_document(
+        self, frame: DocumentFrameData
+    ) -> DocumentContextData: ...
+
+
+class VisionAnalysisQuotaPort(Protocol):
+    """Global spend guard checked immediately before a real VLM request."""
+
+    async def consume(self) -> bool: ...
 
 
 class KnowledgeVectorPort(VectorIndexPort, KnowledgeRetrievalPort, Protocol):

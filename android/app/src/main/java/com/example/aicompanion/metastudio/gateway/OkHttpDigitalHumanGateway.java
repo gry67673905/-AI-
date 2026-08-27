@@ -53,14 +53,13 @@ public final class OkHttpDigitalHumanGateway implements DigitalHumanGateway {
         JsonObject body = new JsonObject();
         body.addProperty("session_id", sessionId);
         body.addProperty("chat_id", chatId);
-        // Action-intent exchange is private. Anonymous users are routed to login by the native
-        // coordinator without sending an exchange request.
-        api.execute(
+        // The backend may return a harmless anonymous navigation intent. Native policy still
+        // rejects every role-incompatible section and requires explicit confirmation.
+        api.executeOptionalAuth(
             NativeApiClient.Action.POST,
             new String[]{"integrations", "metastudio", "action-intents", intentId, "exchange"},
             Collections.emptyMap(),
             body,
-            true,
             true,
             callback
         );

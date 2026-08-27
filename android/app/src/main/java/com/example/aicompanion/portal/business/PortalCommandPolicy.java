@@ -37,6 +37,7 @@ public final class PortalCommandPolicy {
         Command.PROCESS_GET,
         Command.FORM_SCHEMA_GET,
         Command.WINDOW_LIST,
+        Command.CHAT_SESSION_RESET,
         Command.CHAT_STREAM
     );
     private static final EnumSet<Command> CITIZEN_COMMANDS = EnumSet.of(
@@ -51,6 +52,9 @@ public final class PortalCommandPolicy {
         Command.APPLICATION_WITHDRAW,
         Command.APPLICATION_DISCARD,
         Command.APPLICATION_TIMELINE,
+        Command.MATERIAL_TEMPLATE_OPTIONS_GET,
+        Command.MATERIAL_TEMPLATE_GENERATE,
+        Command.MATERIAL_TEMPLATE_STATUS_GET,
         Command.DELIVERY_SET,
         Command.APPOINTMENT_LIST,
         Command.APPOINTMENT_BOOK,
@@ -62,6 +66,8 @@ public final class PortalCommandPolicy {
         Command.VERIFICATION_CONFIRM,
         Command.DELIVERY_CANCEL,
         Command.CONSULTATION_HISTORY,
+        Command.CONSULTATION_MESSAGES,
+        Command.CONSULTATION_MATERIAL_CONFIRM,
         Command.CONSULTATION_FEEDBACK,
         Command.HANDOFF_CREATE,
         Command.HANDOFF_MESSAGES,
@@ -195,7 +201,14 @@ public final class PortalCommandPolicy {
                 if (messageError != null) return messageError;
                 String message = payload.get("message").getAsString().trim();
                 int length = message.codePointCount(0, message.length());
-                return length > 1000 ? "message 不能超过 1000 个字符" : null;
+                if (length > 1000) return "message 不能超过 1000 个字符";
+                String chatSessionError = optionalSafeId(payload, "session_id");
+                if (chatSessionError != null) return chatSessionError;
+                String chatServiceError = optionalSafeId(payload, "service_id");
+                return chatServiceError == null
+                    ? optionalSafeId(payload, "application_id") : chatServiceError;
+            case CHAT_SESSION_RESET:
+                return payload.size() == 0 ? null : "CHAT_SESSION_RESET 不接受参数";
             case CATALOG_DETAILS:
             case ELIGIBILITY_CHECK:
             case MATERIALS_GET:
@@ -217,6 +230,42 @@ public final class PortalCommandPolicy {
             case STAFF_REJECT:
             case STAFF_COMPLETE:
                 return requireSafeId(payload, "application_id");
+            case MATERIAL_TEMPLATE_OPTIONS_GET:
+                return requireSafeId(payload, "application_id");
+            case MATERIAL_TEMPLATE_GENERATE:
+                String applicationError = requireSafeId(payload, "application_id");
+                if (applicationError != null) return applicationError;
+                String requirementError = requireSafeId(payload, "requirement_code");
+                if (requirementError != null) return requirementError;
+                String templateError = requireSafeId(payload, "template_id");
+                if (templateError != null) return templateError;
+                JsonElement requestText = payload.get("request_text");
+                if (requestText != null && !requestText.isJsonNull()) {
+                    if (!requestText.isJsonPrimitive() || !requestText.getAsJsonPrimitive().isString()) {
+                        return "request_text 必须是字符串";
+                    }
+                    String text = requestText.getAsString();
+                    if (text.codePointCount(0, text.length()) > 300) {
+                        return "request_text 不能超过 300 个字符";
+                    }
+                }
+                return null;
+            case MATERIAL_TEMPLATE_STATUS_GET:
+                return requireSafeId(payload, "generation_id");
+            case CONSULTATION_HISTORY:
+                String historyCursorError = optionalSafeId(payload, "cursor");
+                return historyCursorError == null
+                    ? optionalBoundedInteger(payload, "limit", 1, 100) : historyCursorError;
+            case CONSULTATION_MESSAGES:
+                String messagesSessionError = requireSafeId(payload, "session_id");
+                if (messagesSessionError != null) return messagesSessionError;
+                String beforeError = optionalSafeId(payload, "before");
+                return beforeError == null
+                    ? optionalBoundedInteger(payload, "limit", 1, 50) : beforeError;
+            case CONSULTATION_MATERIAL_CONFIRM:
+                String consultationSessionError = requireSafeId(payload, "session_id");
+                return consultationSessionError == null
+                    ? requireSafeId(payload, "intent_id") : consultationSessionError;
             case APPOINTMENT_CANCEL:
                 return requireSafeId(payload, "appointment_id");
             case APPOINTMENT_BOOK:
@@ -271,6 +320,33 @@ public final class PortalCommandPolicy {
         String missing = requireNonBlank(payload, key);
         if (missing != null) return missing;
         return isSafeResourceId(payload.get(key).getAsString()) ? null : key + " 格式无效";
+    }
+
+    private static String optionalSafeId(JsonObject payload, String key) {
+        JsonElement value = payload.get(key);
+        if (value == null || value.isJsonNull()) return null;
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()
+            || !isSafeResourceId(value.getAsString())) {
+            return key + " 格式无效";
+        }
+        return null;
+    }
+
+    private static String optionalBoundedInteger(
+        JsonObject payload, String key, int minimum, int maximum
+    ) {
+        JsonElement value = payload.get(key);
+        if (value == null || value.isJsonNull()) return null;
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+            return key + " 必须是整数字符串";
+        }
+        try {
+            int parsed = Integer.parseInt(value.getAsString());
+            return parsed >= minimum && parsed <= maximum
+                ? null : key + " 超出允许范围";
+        } catch (NumberFormatException ignored) {
+            return key + " 必须是整数字符串";
+        }
     }
 
     private static String requireNonBlank(JsonObject payload, String... keys) {

@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Annotated, Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
-from app.application.dtos import Principal
+from app.application.dtos import DocumentFrameData, Principal
 from app.application.metastudio import MetaStudioChatCommand, MetaStudioTurn
 from app.boundaries.http import current_principal, optional_principal
 from app.boundaries.metastudio_schemas import (
@@ -22,7 +29,18 @@ from app.boundaries.metastudio_schemas import (
     MetaStudioIntentExchangeRequest,
     MetaStudioIntentExchangeResponse,
     MetaStudioLlmRequest,
+    MetaStudioVisionSessionRequest,
+    MetaStudioVisionSessionResponse,
 )
+from app.boundaries.vision_protocol import (
+    VisionProtocolError,
+    binary_packet_type,
+    parse_control_message,
+    parse_document_frame_packet,
+    parse_frame_packet,
+)
+from app.application.vision import DocumentAnalysisError
+from app.errors import DependencyUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +201,8 @@ def _runtime(request: Request) -> Any:
 
 
 class MetaStudioHttpBoundary:
+    _VISION_WS_PATH = "/api/v1/integrations/metastudio/vision/ws"
+
     def __init__(self) -> None:
         self.router = APIRouter(prefix="/integrations/metastudio", tags=["MetaStudio"])
         self.router.add_api_route("/llm", self.llm, methods=["POST"])
@@ -199,6 +219,14 @@ class MetaStudioHttpBoundary:
             methods=["POST"],
             response_model=MetaStudioIntentExchangeResponse,
         )
+        self.router.add_api_route(
+            "/vision-sessions",
+            self.vision_session,
+            methods=["POST"],
+            response_model=MetaStudioVisionSessionResponse,
+            responses={503: {"description": "视觉服务未启用或依赖不可用"}},
+        )
+        self.router.add_api_websocket_route("/vision/ws", self.vision_ws)
 
     async def llm(
         self,
@@ -255,12 +283,14 @@ class MetaStudioHttpBoundary:
             quota_subject, client_quota_key = await runtime.metastudio.quota_identity(
                 command.client_id
             )
-            anonymous_key = hashlib.sha256(
-                f"{payload.app_id}:{payload.user}".encode("utf-8")
-            ).hexdigest()[:32]
             await quota.consume(
                 quota_subject,
-                client_quota_key or f"metastudio-provider:{anonymous_key}",
+                # A missing/expired client context must not let a provider-
+                # generated anonymous user value mint a fresh quota subject
+                # after every activity re-entry. Keep all unbound callbacks in
+                # one conservative bucket; valid clients retain their stable
+                # account/IP-derived pseudonym above.
+                client_quota_key or "metastudio-provider:unbound",
             )
         if payload.is_stream:
             return self._stream(runtime.metastudio, command)
@@ -364,8 +394,350 @@ class MetaStudioHttpBoundary:
         intent_id: UUID,
         payload: MetaStudioIntentExchangeRequest,
         request: Request,
-        principal: Annotated[Principal, Depends(current_principal)],
+        principal: Annotated[Principal | None, Depends(optional_principal)],
     ) -> dict[str, Any]:
         return await _runtime(request).metastudio.exchange_intent(
             principal, intent_id, payload.session_id, payload.chat_id
         )
+
+    async def vision_session(
+        self,
+        payload: MetaStudioVisionSessionRequest,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        callback_url = urlsplit(runtime.settings.metastudio_callback_url)
+        if (
+            callback_url.scheme.lower() != "https"
+            or callback_url.hostname is None
+            or callback_url.username is not None
+            or callback_url.password is not None
+        ):
+            raise DependencyUnavailable("metastudio_vision")
+        websocket_url = urlunsplit(
+            ("wss", callback_url.netloc, self._VISION_WS_PATH, "", "")
+        )
+        # Validate the public WSS origin before minting a one-use ticket so a
+        # broken deployment cannot leave partially usable credentials behind.
+        bundle = await runtime.metastudio.create_vision_session(
+            principal, payload.client_session_id
+        )
+        return {
+            "vision_session_id": bundle.vision_session_id,
+            "vision_websocket_url": websocket_url,
+            "vision_token": bundle.vision_token,
+            "vision_expires_at": bundle.vision_expires_at,
+        }
+
+    @staticmethod
+    async def _vision_error(websocket: WebSocket, code: str) -> None:
+        await websocket.send_json({"v": 1, "type": "vision.error", "code": code})
+
+    async def vision_ws(self, websocket: WebSocket) -> None:
+        runtime = websocket.app.state.services.business
+        authorization = websocket.headers.get("authorization", "")
+        scheme, separator, token = authorization.partition(" ")
+        if not separator or scheme.lower() != "bearer" or not token:
+            await websocket.close(code=4401, reason="vision_auth_failed")
+            return
+        try:
+            claims = await runtime.vision.consume_ticket(token)
+            if claims is None or not await runtime.metastudio.authorize_vision_claim(claims):
+                await websocket.close(code=4401, reason="vision_auth_failed")
+                return
+        except Exception:
+            await websocket.close(code=1011, reason="vision_dependency_unavailable")
+            return
+
+        await websocket.accept()
+        started = False
+        active_turn: int | None = None
+        active_document: int | None = None
+        document_sequences: set[int] = set()
+        document_sequence_limit = 32
+        document_task: asyncio.Task[None] | None = None
+        send_lock = asyncio.Lock()
+        invalid_messages = 0
+        settings = runtime.settings
+
+        async def send_json(payload: dict[str, Any]) -> None:
+            async with send_lock:
+                await websocket.send_json(payload)
+
+        async def analyze_document(frame: DocumentFrameData) -> None:
+            try:
+                await runtime.vision.analyze_document(claims, frame)
+            except DocumentAnalysisError as exc:
+                await send_json(
+                    {
+                        "v": 1,
+                        "type": "document.error",
+                        "document_seq": frame.document_sequence,
+                        "code": exc.code,
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await send_json(
+                    {
+                        "v": 1,
+                        "type": "document.error",
+                        "document_seq": frame.document_sequence,
+                        "code": "analysis_unavailable",
+                    }
+                )
+            else:
+                # OCR text is deliberately not returned over WSS. The next
+                # signed MetaStudio turn consumes the short-lived context.
+                await send_json(
+                    {
+                        "v": 1,
+                        "type": "document.ready",
+                        "document_seq": frame.document_sequence,
+                    }
+                )
+            finally:
+                frame = None
+
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                text_message = message.get("text")
+                binary_message = message.get("bytes")
+                frame = None
+                document_frame = None
+                document_state_reason: str | None = None
+                try:
+                    if text_message is not None:
+                        control = parse_control_message(text_message)
+                        message_type = control["type"]
+                        if not started:
+                            if message_type != "vision.start":
+                                raise VisionProtocolError("vision_start_required")
+                            if (
+                                control["vision_session_id"] != claims.vision_session_id
+                                or control["client_session_id"]
+                                != claims.client_session_id
+                            ):
+                                raise VisionProtocolError("session_mismatch")
+                            if not await runtime.vision.register_session(claims):
+                                raise VisionProtocolError("vision_session_active")
+                            started = True
+                            await send_json(
+                                {"v": 1, "type": "vision.started"}
+                            )
+                            continue
+                        if message_type == "vision.start":
+                            raise VisionProtocolError("duplicate_start")
+                        if message_type == "document.start":
+                            document_sequence = control["document_seq"]
+                            # Preserve the single public protocol error while
+                            # recording only a fixed, value-free reason.  This
+                            # makes live failures diagnosable without logging
+                            # sequence/session IDs, request contents, tickets,
+                            # or Authorization headers.
+                            if active_turn is not None:
+                                document_state_reason = "active_turn"
+                            elif active_document is not None:
+                                document_state_reason = "active_document"
+                            elif (
+                                document_task is not None
+                                and not document_task.done()
+                            ):
+                                document_state_reason = "document_task"
+                            elif document_sequence in document_sequences:
+                                document_state_reason = "duplicate_sequence"
+                            elif len(document_sequences) >= document_sequence_limit:
+                                document_state_reason = "sequence_limit"
+                            if document_state_reason is not None:
+                                raise VisionProtocolError("invalid_document_state")
+                            if not await runtime.vision.start_document(
+                                claims, document_sequence
+                            ):
+                                document_state_reason = "coordinator_rejected"
+                                raise VisionProtocolError("invalid_document_state")
+                            active_document = document_sequence
+                            await send_json(
+                                {
+                                    "v": 1,
+                                    "type": "document.started",
+                                    "document_seq": document_sequence,
+                                }
+                            )
+                            continue
+                        turn_sequence = control["turn_seq"]
+                        if message_type == "turn.start":
+                            if (
+                                active_turn is not None
+                                or active_document is not None
+                                or (
+                                    document_task is not None
+                                    and not document_task.done()
+                                )
+                                or not await runtime.vision.start_turn(
+                                    claims, turn_sequence
+                                )
+                            ):
+                                raise VisionProtocolError("invalid_turn_state")
+                            active_turn = turn_sequence
+                            await send_json(
+                                {
+                                    "v": 1,
+                                    "type": "turn.started",
+                                    "turn_seq": turn_sequence,
+                                }
+                            )
+                            continue
+                        if active_turn != turn_sequence or not await runtime.vision.end_turn(
+                            claims, turn_sequence
+                        ):
+                            raise VisionProtocolError("invalid_turn_state")
+                        active_turn = None
+                        await send_json(
+                            {
+                                "v": 1,
+                                "type": "turn.ended",
+                                "turn_seq": turn_sequence,
+                            }
+                        )
+                        continue
+
+                    if binary_message is None or not started:
+                        raise VisionProtocolError("vision_start_required")
+                    packet_type = binary_packet_type(binary_message)
+                    if packet_type == "document.frame":
+                        if active_document is None:
+                            raise VisionProtocolError("document_start_required")
+                        document_frame = parse_document_frame_packet(
+                            binary_message,
+                            claims,
+                            max_frame_bytes=1024 * 1024,
+                            max_dimension=2048,
+                            max_clock_skew_seconds=settings.vision_clock_skew_seconds,
+                        )
+                        if document_frame.document_sequence != active_document:
+                            raise VisionProtocolError("document_mismatch")
+                        # Value-free capture telemetry is enough to distinguish
+                        # an unreadable source photo from transport/schema
+                        # failures.  Never log the JPEG, OCR text, ticket,
+                        # session identifiers, or request headers.
+                        logger.info(
+                            "vision_protocol stage=document_frame status=accepted "
+                            "width=%d height=%d jpeg_bytes=%d camera=%s",
+                            document_frame.width,
+                            document_frame.height,
+                            len(document_frame.jpeg),
+                            document_frame.camera,
+                        )
+                        document_sequence = active_document
+                        active_document = None
+                        document_sequences.add(document_sequence)
+                        # Receipt is acknowledged before starting the one paid
+                        # provider call, keeping UI and inference independent.
+                        await send_json(
+                            {
+                                "v": 1,
+                                "type": "document.ack",
+                                "document_seq": document_sequence,
+                                "status": "accepted",
+                            }
+                        )
+                        document_task = asyncio.create_task(
+                            analyze_document(document_frame),
+                            name="metastudio-document-analysis",
+                        )
+                        document_task.add_done_callback(
+                            lambda completed: (
+                                None
+                                if completed.cancelled()
+                                else completed.exception()
+                            )
+                        )
+                        document_frame = None
+                        continue
+                    if active_turn is None:
+                        raise VisionProtocolError("turn_start_required")
+                    frame = parse_frame_packet(
+                        binary_message,
+                        claims,
+                        max_frame_bytes=settings.vision_max_frame_bytes,
+                        max_width=settings.vision_max_dimension,
+                        max_height=settings.vision_max_dimension,
+                        max_clock_skew_seconds=settings.vision_clock_skew_seconds,
+                    )
+                    if frame.turn_sequence != active_turn:
+                        raise VisionProtocolError("turn_mismatch")
+                    result = await runtime.vision.ingest(claims, frame)
+                    if result not in {"accepted", "frame_rate_limited"}:
+                        raise VisionProtocolError(result)
+                    await send_json(
+                        {
+                            "v": 1,
+                            "type": "vision.ack",
+                            "turn_seq": frame.turn_sequence,
+                            "frame_seq": frame.frame_sequence,
+                            "status": (
+                                "accepted"
+                                if result == "accepted"
+                                else "dropped"
+                            ),
+                        }
+                    )
+                except VisionProtocolError as exc:
+                    invalid_messages += 1
+                    # The category is drawn from the protocol parser's fixed,
+                    # non-secret vocabulary.  Keep enough telemetry to
+                    # distinguish a rejected control from a malformed JPEG
+                    # without ever logging headers, tickets or image bytes.
+                    if (
+                        exc.code == "invalid_document_state"
+                        and document_state_reason is not None
+                    ):
+                        logger.warning(
+                            "vision_protocol stage=message status=rejected "
+                            "category=%s reason=%s",
+                            _diagnostic_name(exc.code),
+                            _diagnostic_name(document_state_reason),
+                        )
+                    else:
+                        logger.warning(
+                            "vision_protocol stage=message status=rejected category=%s",
+                            _diagnostic_name(exc.code),
+                        )
+                    await send_json(
+                        {"v": 1, "type": "vision.error", "code": exc.code}
+                    )
+                    if invalid_messages >= 3:
+                        await websocket.close(code=4400, reason="vision_protocol_error")
+                        return
+                finally:
+                    # Do not let the coroutine's last loop locals pin a raw
+                    # packet after the frame store's independent TTL sweeper
+                    # has removed it while this socket remains idle.
+                    frame = None
+                    document_frame = None
+                    binary_message = None
+                    text_message = None
+                    message = None
+        except WebSocketDisconnect:
+            return
+        finally:
+            if document_task is not None:
+                if not document_task.done():
+                    document_task.cancel()
+                await asyncio.gather(document_task, return_exceptions=True)
+            if started:
+                try:
+                    await runtime.vision.discard_session(
+                        claims,
+                        # A short no-bytes generation tombstone prevents an old
+                        # in-flight callback from binding to a replacement WSS.
+                        # It is consumed by that callback or expires by TTL.
+                        mark_unavailable=True,
+                    )
+                except Exception:
+                    pass

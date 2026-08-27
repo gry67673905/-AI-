@@ -1,0 +1,7 @@
+事项编码,网点编码,名称,地址,城市,经度,纬度,坐标系,开放时间,优先级,办理模式,线上状态,数据模式,来源,核验时间
+DEMO-ID-REISSUE-001,CD-DEMO-PS-01,成都合成公安服务点一,成都市设备测试合成地址一号,510100,104.0668,30.6573,GCJ02,工作日 09:00-17:00,0,OFFLINE_ONLY,UNKNOWN,DEMO,demo://chengdu-device-test,
+DEMO-ID-REISSUE-001,CD-DEMO-PS-02,成都合成公安服务点二,成都市设备测试合成地址二号,510100,104.0815,30.6505,GCJ02,工作日 09:00-17:00,10,OFFLINE_ONLY,UNKNOWN,DEMO,demo://chengdu-device-test,
+DEMO-ID-REISSUE-001,CD-DEMO-PS-03,成都合成公安服务点三,成都市设备测试合成地址三号,510100,104.0438,30.6329,GCJ02,工作日 09:00-17:00,20,OFFLINE_ONLY,UNKNOWN,DEMO,demo://chengdu-device-test,
+DEMO-HOUSING-FUND-001,CD-DEMO-HF-01,成都合成公积金服务点一,成都市设备测试合成地址四号,510100,104.0668,30.6573,GCJ02,工作日 09:00-17:00,0,BOTH,AVAILABLE,DEMO,demo://chengdu-device-test,
+DEMO-HOUSING-FUND-001,CD-DEMO-HF-02,成都合成公积金服务点二,成都市设备测试合成地址五号,510100,104.0815,30.6505,GCJ02,工作日 09:00-17:00,10,BOTH,AVAILABLE,DEMO,demo://chengdu-device-test,
+DEMO-HOUSING-FUND-001,CD-DEMO-HF-03,成都合成公积金服务点三,成都市设备测试合成地址六号,510100,104.0438,30.6329,GCJ02,工作日 09:00-17:00,20,BOTH,AVAILABLE,DEMO,demo://chengdu-device-test,

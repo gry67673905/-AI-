@@ -18,6 +18,7 @@ public final class DigitalHumanMessagePolicy {
     private static final Pattern ID = Pattern.compile("[A-Za-z0-9._:-]{1,256}");
     private static final Set<String> SDK_STATUSES = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
         "checking_browser", "creating", "ready", "active", "ended",
+        "asr_partial", "asr_final", "answering",
         "unsupported", "sdk_missing", "error"
     )));
 
@@ -34,7 +35,11 @@ public final class DigitalHumanMessagePolicy {
             return Decision.denied("invalid_web_message", "数字人页面消息不是有效JSON");
         }
         String event = string(object, "event");
-        if ("page_ready".equals(event) || "close".equals(event)) return Decision.event(event);
+        if ("page_ready".equals(event) || "close".equals(event)) {
+            return object.size() == 1
+                ? Decision.event(event)
+                : Decision.denied("invalid_event", "数字人页面事件字段无效");
+        }
         if ("sdk_status".equals(event)) {
             String status = string(object, "status");
             if (object.size() != 2 || !(SDK_STATUSES.contains(status)
@@ -46,6 +51,9 @@ public final class DigitalHumanMessagePolicy {
         }
         if (!"semantic_final".equals(event)) {
             return Decision.denied("unsupported_web_message", "数字人页面消息类型不受支持");
+        }
+        if (object.size() != 4) {
+            return Decision.denied("invalid_intent", "数字人操作意图字段无效");
         }
         String chatId = string(object, "chat_id");
         String intentId = string(object, "intent_id");

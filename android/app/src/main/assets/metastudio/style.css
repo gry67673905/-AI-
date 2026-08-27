@@ -11,6 +11,47 @@ html, body, #digital-human-shell, #ics-sdk {
     overflow: hidden;
 }
 
+#local-caption {
+    position: fixed;
+    right: 16px;
+    bottom: max(96px, calc(env(safe-area-inset-bottom) + 80px));
+    left: 16px;
+    z-index: 2147483646;
+    display: grid;
+    gap: 6px;
+    box-sizing: border-box;
+    max-width: 760px;
+    max-height: 9.5em;
+    margin: 0 auto;
+    padding: 12px 16px;
+    overflow: hidden;
+    color: #10223a;
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(23, 105, 224, 0.24);
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(16, 34, 58, 0.18);
+    pointer-events: none;
+}
+
+#local-caption[hidden] {
+    display: none;
+}
+
+#local-caption-label {
+    color: #1769e0;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+#local-caption-text {
+    margin: 0;
+    overflow: hidden;
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
 #hard-gate {
     position: fixed;
     inset: 0;
@@ -21,6 +62,7 @@ html, body, #digital-human-shell, #ics-sdk {
     text-align: center;
     background: #eef7ff;
     color: #1a2433;
+    z-index: 2147483647;
 }
 
 #hard-gate[hidden] {

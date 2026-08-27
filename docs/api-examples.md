@@ -107,7 +107,7 @@ Content-Type: application/json
 }
 ```
 
-`session_id`、`service_id` 和 `application_id` 均可选；只有授权登录用户可带 `application_id`。响应示意：
+`session_id`、`service_id` 和 `application_id` 均可选；只有授权登录用户可带 `application_id`。登录用户的会话会持久化，模型最多使用最近 8 条脱敏消息作为对话上下文；事项匹配、MCP、RAG 和缓存仍只处理当前问题。响应示意：
 
 ```json
 {
@@ -151,10 +151,12 @@ event: delta
 data: {"text":"增量文本"}
 
 event: done
-data: {"request_id":"...","session_id":"...","warnings":[],"suggested_actions":[]}
+data: {"request_id":"...","session_id":"...","warnings":[],"suggested_actions":[],"ui_cards":[{"type":"MATERIAL_TEMPLATE","state":"AVAILABLE","title":"遗失情况说明","notice":"可生成空白可编辑模板"}]}
 ```
 
 失败通过 `event: error` 返回 `{ "code": "...", "message": "..." }`，客户端不应把 HTTP 连接结束当成完整答案。
+
+`done.ui_cards` 是受控展示数据，只会包含卡片类型、显示文字、状态和不透明的 `intent_id` 或 `generation_id`；不会包含下载 URL、MinIO 对象键、模板内部 ID、令牌或 HTML。模板状态为 `AVAILABLE`、`CONFIRMATION_REQUIRED`、`QUEUED`、`RUNNING`、`READY`、`FAILED` 或 `EXPIRED`。
 
 ## 认证
 
@@ -424,10 +426,28 @@ Idempotency-Key: <uuid>
 
 ## 咨询历史与转人工
 
-登录后发起一次 `/chat`，其 `session_id` 会关联当前账号，随后可调用：
+登录后发起一次 `/chat` 或 `/chat/stream`，其 `session_id` 会关联当前账号。客户端可清空本地会话标识后用下一条消息创建“新对话”；登录、注册、退出或身份失效时必须丢弃旧匿名会话标识。会话摘要和消息恢复为：
 
 ```http
-GET  /api/v1/consultations
+GET /api/v1/consultations?cursor=&limit=20
+GET /api/v1/consultations/{session_id}/messages?before=&limit=50
+```
+
+两个接口均只返回当前账号拥有的会话。消息可带持久化的安全 `ui_cards`，使重启后仍能恢复未过期任务的下载按钮；响应不提供 DOCX 直链。
+
+咨询内的模板卡只在显式确认后创建独立空白模板任务：
+
+```http
+POST /api/v1/consultations/{session_id}/material-intents/{intent_id}/confirm
+Authorization: Bearer <access-token>
+Idempotency-Key: <随机且本次重试保持不变的值>
+```
+
+意图限时 5 分钟，且绑定账号、会话、模板和单次消费状态；过期、跨账号/跨会话、停用模板或无效幂等请求会被拒绝。成功返回 `202 + generation_id`。用户的聊天原文不会作为字段传给 Word Worker，该模式生成空白可编辑模板。
+
+原有反馈和转人工接口保持不变：
+
+```http
 POST /api/v1/consultations/feedback
 
 { "session_id": "<session_uuid>", "rating": 5, "comment": "合成演示反馈" }
@@ -555,7 +575,7 @@ Idempotency-Key: <uuid>
 
 ## 完整 OpenAPI 操作清单
 
-以下 76 个 method/path 与当前最终 `/openapi.json` 一致；版本化团队 RAG 通过运维命令导入，不暴露额外业务路由。请求体、认证和状态规则以上文及实时 OpenAPI 为准。
+以下操作以当前 `/openapi.json` 为准；版本化团队 RAG 通过运维命令导入，不暴露额外业务路由。请求体、认证和状态规则以上文及实时 OpenAPI 为准。
 
 ```text
 GET /health/live
@@ -589,6 +609,8 @@ POST /api/v1/applications/{application_id}/discard
 GET /api/v1/applications/{application_id}/timeline
 POST /api/v1/applications/{application_id}/delivery
 GET /api/v1/consultations
+GET /api/v1/consultations/{session_id}/messages
+POST /api/v1/consultations/{session_id}/material-intents/{intent_id}/confirm
 POST /api/v1/consultations/feedback
 POST /api/v1/consultations/handoffs
 GET /api/v1/consultations/handoffs
@@ -631,10 +653,45 @@ POST /api/v1/verifications
 POST /api/v1/verifications/{verification_id}/complete
 POST /api/v1/deliveries/{delivery_id}/status
 POST /api/v1/deliveries/{delivery_id}/cancel
+GET  /api/v1/applications/{application_id}/material-template-options
+POST /api/v1/applications/{application_id}/material-documents
+GET  /api/v1/material-documents/{generation_id}
+GET  /api/v1/material-documents/{generation_id}/download
 POST /api/v1/integrations/metastudio/client-sessions
 POST /api/v1/integrations/metastudio/llm
 POST /api/v1/integrations/metastudio/action-intents/{intent_id}/exchange
 ```
+
+## 生成可填写材料 Word
+
+只有办件所属群众能读取选项和生成文件。先读取办件当前事项的模板：
+
+```http
+GET /api/v1/applications/{application_id}/material-template-options
+Authorization: Bearer <access-token>
+```
+
+证件或证明类材料返回 `template_available=false`。可生成材料使用返回的 `requirement_code` 和
+`template_id` 创建单次异步任务：
+
+```http
+POST /api/v1/applications/{application_id}/material-documents
+Authorization: Bearer <access-token>
+Idempotency-Key: <随机且本次重试保持不变的值>
+Content-Type: application/json
+
+{
+  "requirement_code": "id-2",
+  "template_id": "00000000-0000-0000-0000-000000000000",
+  "request_text": "预填合成联系人和遗失日期",
+  "synthetic_data_confirmed": true
+}
+```
+
+响应为 `202`，客户端轮询 `GET /api/v1/material-documents/{generation_id}`。只有 `READY` 可从固定
+`/download` 路径下载，响应类型必须为 DOCX，并带 `X-Content-SHA256`、`Cache-Control: private,
+no-store` 和 `X-Content-Type-Options: nosniff`。文件 24 小时后返回 410；服务端不返回 MinIO key、URL
+或预签名地址。
 
 ## 可选 MetaStudio 智能交互
 

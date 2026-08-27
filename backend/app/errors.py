@@ -45,6 +45,11 @@ class ConflictError(ServiceError):
         self.detail = detail
 
 
+class GoneError(ServiceError):
+    def __init__(self, message: str, code: str = "gone"):
+        super().__init__(code, message, 410)
+
+
 class BusinessValidationError(ServiceError):
     def __init__(self, message: str, detail: object | None = None):
         super().__init__("business_validation_failed", message, 422)
@@ -57,5 +62,9 @@ class DependencyUnavailable(ServiceError):
 
 
 class TooManyRequests(ServiceError):
-    def __init__(self, message: str = "今日智能问答额度已用完，请明日再试"):
-        super().__init__("chat_quota_exceeded", message, 429)
+    def __init__(
+        self,
+        message: str = "今日智能问答额度已用完，请明日再试",
+        code: str = "chat_quota_exceeded",
+    ):
+        super().__init__(code, message, 429)

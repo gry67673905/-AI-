@@ -1,0 +1,3 @@
+事项编码,网点编码,名称,地址,城市,经度,纬度,坐标系,开放时间,优先级,办理模式,线上状态,数据模式,来源,核验时间
+DEMO-ID-REISSUE-001,DEMO-POLICE-NAV-01,演示公安政务服务中心,演示市政务路100号,DEMO-CITY,116.397128,39.916527,GCJ02,工作日 09:00-17:00,0,OFFLINE_ONLY,UNKNOWN,DEMO,demo://navigation-catalog,
+DEMO-SS-CARD-001,DEMO-SOCIAL-NAV-01,演示社保服务大厅,演示市民生路88号,DEMO-CITY,116.407526,39.904030,GCJ02,工作日 08:30-17:30,10,BOTH,AVAILABLE,DEMO,demo://navigation-catalog,

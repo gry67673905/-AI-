@@ -5,10 +5,18 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Visual assistance is optional; camera-less devices keep the voice-only experience. -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
 
     <queries>
         <package android:name="com.huawei.hwid" />
-        <package android:name="com.huawei.maps.app" />
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application
@@ -19,9 +27,16 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
+        <provider
+            android:name=".portal.gateway.SecureSessionBrokerProvider"
+            android:authorities="${applicationId}.secure-session-broker"
+            android:exported="false"
+            android:grantUriPermissions="false" />
+
         <activity
-            android:name=".HmsMapActivity"
-            android:exported="false" />
+            android:name=".ServiceNavigationActivity"
+            android:exported="false"
+            android:label="@string/service_navigation_title" />
 
         <activity
             android:name=".DigitalHumanActivity"

@@ -6,42 +6,21 @@ import json
 import math
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
-from pydantic import SecretStr
 from redis.asyncio import Redis
 
 from app.application.ports import MetaStudioSessionPort
 from app.errors import DependencyUnavailable
+from app.infrastructure.secrets import secret_value
 
 
 _HEX_TIMESTAMP = re.compile(r"^[0-9a-fA-F]{1,32}$")
 _HEX_SIGNATURE = re.compile(r"^[0-9a-fA-F]{64}$")
 _APP_ID = re.compile(r"^[0-9a-f]{32}$")
 _APP_KEY = re.compile(r"^[0-9a-f]{32}$")
-
-
-def secret_value(value: SecretStr | None, file_path: str | None) -> str | None:
-    """Read a mounted single-line secret without ever logging its value."""
-
-    if file_path:
-        try:
-            raw = Path(file_path).read_text(encoding="utf-8")
-        except OSError:
-            return None
-        resolved = raw.strip()
-        if "\n" in resolved or "\r" in resolved:
-            return None
-        return resolved or None
-    if value is None:
-        return None
-    resolved = value.get_secret_value().strip()
-    if "\n" in resolved or "\r" in resolved:
-        return None
-    return resolved or None
 
 
 class RedisMetaStudioSessionAdapter(MetaStudioSessionPort):

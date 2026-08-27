@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
 import pytest
@@ -453,6 +453,39 @@ async def test_owned_chat_rejects_anonymous_and_cross_user_before_message_write(
 
 
 @pytest.mark.asyncio
+async def test_chat_history_conceals_cross_owner_and_rejects_unowned_context() -> None:
+    owner_id = uuid4()
+    owned = ChatSession(id=uuid4(), owner_account_id=owner_id)
+
+    class Session:
+        async def get(self, *_: object, **__: object) -> ChatSession:
+            return owned
+
+    class Context:
+        async def __aenter__(self) -> Session:
+            return Session()
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class Sessions:
+        def __call__(self) -> Context:
+            return Context()
+
+    database = object.__new__(Database)
+    database.sessions = Sessions()  # type: ignore[assignment]
+
+    with pytest.raises(ResourceNotFound):
+        await database.list_messages_authorized(
+            owned.id, uuid4(), limit=50
+        )
+    with pytest.raises(AuthenticationRequired):
+        await database.load_recent_history(owned.id, None, limit=8)
+    with pytest.raises(PermissionDenied):
+        await database.load_recent_history(owned.id, uuid4(), limit=8)
+
+
+@pytest.mark.asyncio
 async def test_legacy_anonymous_chat_stays_anonymous_and_authenticated_chat_starts_owned() -> None:
     anonymous = ChatSession(id=uuid4(), owner_account_id=None)
 
@@ -602,7 +635,7 @@ async def test_first_chat_messages_are_serialized_by_session_advisory_lock() -> 
         database.save_user_message(session_id, uuid4(), "owner-b", owner_b),
         return_exceptions=True,
     )
-    assert sum(result is None for result in results) == 1
+    assert sum(isinstance(result, UUID) for result in results) == 1
     assert sum(isinstance(result, PermissionDenied) for result in results) == 1
     assert cross_owner.current is not None
     assert cross_owner.current.owner_account_id in {owner_a, owner_b}
@@ -1427,12 +1460,14 @@ async def test_business_runtime_concurrent_startup_hashes_and_seeds_once() -> No
     runtime = object.__new__(BusinessRuntime)
     runtime._startup_lock = asyncio.Lock()  # noqa: SLF001
     runtime._startup_complete = False  # noqa: SLF001
+    runtime._vision_cleanup_task = None  # noqa: SLF001
     runtime._seed_password_hashes = None  # noqa: SLF001
     runtime.object_store = Store()
     runtime.repository = Repository()
     runtime.vector_index = Vector()
     runtime.security = Security()
     runtime.settings = SimpleNamespace(
+        vision_enabled=False,
         demo_admin_username="admin.demo",
         demo_admin_password=SimpleNamespace(get_secret_value=lambda: "admin-pass"),
         demo_staff_username="staff.demo",

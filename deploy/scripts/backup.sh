@@ -60,6 +60,8 @@ chmod 600 "${backup_dir}/images.json"
     printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'compose_project=smart-gov-cloud-demo\n'
     printf 'milvus_rebuild_source=postgres_active_knowledge_chunks\n'
+    printf 'minio_backup_buckets=materials,knowledge,material-templates\n'
+    printf 'generated_documents_backup=omitted_disposable_24h\n'
     printf 'redis_backup=omitted_disposable_cache\n'
 } >"${backup_dir}/manifest.txt"
 

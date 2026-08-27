@@ -4,10 +4,16 @@ limit_req_zone $binary_remote_addr zone=smartgov_api:10m rate=10r/s;
 limit_req_zone $binary_remote_addr zone=smartgov_chat:10m rate=12r/m;
 limit_req_zone $binary_remote_addr zone=smartgov_metastudio:10m rate=5r/s;
 limit_req_zone $binary_remote_addr zone=smartgov_metastudio_sessions:10m rate=1r/s;
+limit_conn_zone $binary_remote_addr zone=smartgov_vision_ws:10m;
 
 # MetaStudio MSS_A authentication uses query arguments. This access log is
 # intentionally limited to the normalized path and never records arguments.
 log_format smartgov_metastudio_callback
+    'request_id=$request_id remote=$remote_addr method=$request_method '
+    'uri=$uri status=$status bytes=$body_bytes_sent request_time=$request_time '
+    'upstream_status=$upstream_status';
+
+log_format smartgov_vision_ws
     'request_id=$request_id remote=$remote_addr method=$request_method '
     'uri=$uri status=$status bytes=$body_bytes_sent request_time=$request_time '
     'upstream_status=$upstream_status';
@@ -64,7 +70,7 @@ server {
     }
 
     location = /health/live {
-        proxy_pass http://127.0.0.1:18000;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_connect_timeout 3s;
         proxy_read_timeout 5s;
@@ -72,7 +78,7 @@ server {
     }
 
     location = /health/ready {
-        proxy_pass http://127.0.0.1:18000;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_connect_timeout 3s;
         proxy_read_timeout 15s;
@@ -81,7 +87,7 @@ server {
 
     location = /api/v1/chat/stream {
         limit_req zone=smartgov_chat burst=3 nodelay;
-        proxy_pass http://127.0.0.1:18000;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_http_version 1.1;
@@ -95,7 +101,7 @@ server {
 
     location = /api/v1/chat {
         limit_req zone=smartgov_chat burst=3 nodelay;
-        proxy_pass http://127.0.0.1:18000;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_http_version 1.1;
@@ -107,7 +113,7 @@ server {
     location = /api/v1/integrations/metastudio/llm {
         limit_req zone=smartgov_metastudio burst=10 nodelay;
         client_max_body_size 128k;
-        proxy_pass http://127.0.0.1:18000;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_http_version 1.1;
@@ -125,7 +131,7 @@ server {
     location = /api/v1/integrations/metastudio/client-sessions {
         limit_req zone=smartgov_metastudio_sessions burst=3 nodelay;
         client_max_body_size 4k;
-        proxy_pass http://127.0.0.1:18000;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_http_version 1.1;
@@ -134,12 +140,46 @@ server {
         proxy_send_timeout 30s;
     }
 
-    location /api/ {
-        limit_req zone=smartgov_api burst=30 nodelay;
-        proxy_pass http://127.0.0.1:18000;
+    location = /api/v1/integrations/metastudio/vision-sessions {
+        limit_req zone=smartgov_metastudio_sessions burst=3 nodelay;
+        client_max_body_size 4k;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
         include proxy_params;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    location = /api/v1/integrations/metastudio/vision/ws {
+        limit_conn smartgov_vision_ws 2;
+        client_max_body_size 1m;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
+        include proxy_params;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 1900s;
+        proxy_send_timeout 30s;
+        access_log /var/log/nginx/smart-gov-vision-ws.log smartgov_vision_ws;
+        error_log /dev/null crit;
+    }
+
+    location /api/ {
+        limit_req zone=smartgov_api burst=30 nodelay;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
+        include proxy_params;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade "";
+        proxy_set_header Connection "";
         proxy_connect_timeout 10s;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;

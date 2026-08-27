@@ -100,6 +100,22 @@ class MaterialEvaluationRequest(EligibilityRequest):
     pass
 
 
+class MaterialDocumentCreateRequest(BaseModel):
+    requirement_code: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$"
+    )
+    template_id: UUID
+    request_text: str | None = Field(default=None, max_length=300)
+    synthetic_data_confirmed: bool = True
+
+    @field_validator("synthetic_data_confirmed")
+    @classmethod
+    def require_synthetic_data(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("材料模板仅允许使用合成演示数据")
+        return value
+
+
 class DraftApplicationRequest(BaseModel):
     service_id: UUID
     initial_form_data: dict[str, Any] = Field(default_factory=dict)

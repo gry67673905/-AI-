@@ -14,7 +14,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.application.dtos import ChatResult, Principal
+from app.application.dtos import ChatResult, Principal, VisualContextData
 from app.application.metastudio import (
     MetaStudioAnswer,
     MetaStudioChatCommand,
@@ -23,7 +23,12 @@ from app.application.metastudio import (
 )
 from app.domain.enums import ApplicantType, Role
 from app.domain.policies import DigitalHumanIntentPolicy
-from app.errors import ConflictError, DependencyUnavailable, ResourceNotFound
+from app.errors import (
+    AuthenticationRequired,
+    ConflictError,
+    DependencyUnavailable,
+    ResourceNotFound,
+)
 from app.infrastructure.metastudio import (
     HuaweiMetaStudioOnceCodeAdapter,
     MetaStudioCallbackAuthenticator,
@@ -209,8 +214,12 @@ class CapturingConsultations:
         )
         self.command = None
         self.principal = None
+        self.calls = 0
+        self.suggested_actions: list[dict[str, Any]] = []
+        self.answer = "演示回答"
 
     async def chat(self, command, principal, execution_context=None, on_delta=None):
+        self.calls += 1
         self.command = command
         self.principal = principal
         if on_delta:
@@ -218,8 +227,8 @@ class CapturingConsultations:
         return ChatResult(
             request_id=uuid4(),
             session_id=command.session_id,
-            answer="演示回答",
-            suggested_actions=[],
+            answer=self.answer,
+            suggested_actions=self.suggested_actions,
         )
 
 
@@ -228,6 +237,8 @@ class IntentRepository:
         self.created: dict[str, Any] | None = None
         self.consumed: dict[str, Any] | None = None
         self.account: Any | None = None
+        self.navigation_options: dict[str, Any] | None = None
+        self.consume_result: dict[str, Any] | None = None
 
     async def get_account_record(self, _account_id: UUID):
         return self.account
@@ -246,8 +257,16 @@ class IntentRepository:
         }
         return {"id": uuid4(), **{key: self.created[key] for key in ("type", "label", "section", "prefill", "expires_at")}}
 
-    async def consume_digital_human_intent(self, *args):
-        self.consumed = {"args": args}
+    async def get_navigation_options(self, service_id: UUID):
+        if self.navigation_options is None:
+            raise ResourceNotFound("事项线下网点")
+        assert self.navigation_options["service"]["id"] == str(service_id)
+        return self.navigation_options
+
+    async def consume_digital_human_intent(self, *args, **kwargs):
+        self.consumed = {"args": args, "kwargs": kwargs}
+        if self.consume_result is not None:
+            return {"intent_id": args[0], **self.consume_result}
         return {
             "intent_id": args[0],
             "type": "NAVIGATE",
@@ -392,6 +411,7 @@ async def test_anonymous_session_only_receives_safe_navigation_intent() -> None:
         "context_expires_at": "2099-01-01T00:00:00+00:00",
         "account_id": None,
         "role": None,
+        "anonymous_quota_key": "a" * 64,
     }
     repository = IntentRepository()
     coordinator = MetaStudioCoordinator(
@@ -422,6 +442,135 @@ async def test_anonymous_session_only_receives_safe_navigation_intent() -> None:
     assert repository.created["type"] == "OPEN_SERVICES"
     assert repository.created["section"] == "services"
     assert json.loads(answer.extend_param or "{}")["requires_confirmation"] is True
+
+
+@pytest.mark.asyncio
+async def test_grounded_offline_service_creates_minimal_public_navigation_intent() -> None:
+    sessions = MemorySessionStore()
+    client_session_id = uuid4()
+    service_id = uuid4()
+    sessions.values[client_session_id] = {
+        "context_expires_at": "2099-01-01T00:00:00+00:00",
+        "account_id": None,
+        "role": None,
+        "anonymous_quota_key": "b" * 64,
+    }
+    consultations = CapturingConsultations()
+    consultations.suggested_actions = [
+        {
+            "type": "VIEW_SERVICE",
+            "service_id": str(service_id),
+            "label": "社保卡补领",
+        }
+    ]
+    repository = IntentRepository()
+    repository.navigation_options = {
+        "service": {
+            "id": str(service_id),
+            "handling_mode": "OFFLINE_ONLY",
+            "online_status": "UNKNOWN",
+        },
+        "windows": [{"id": str(uuid4())}],
+        "demo_only": True,
+    }
+    coordinator = MetaStudioCoordinator(
+        repository,  # type: ignore[arg-type]
+        consultations,  # type: ignore[arg-type]
+        sessions,  # type: ignore[arg-type]
+        FakeOnceCodes(),
+        pii_hmac_key="pii-test",
+        robot_id="robot01",
+        server_address="metastudio-api.cn-north-4.myhuaweicloud.com",
+        context_ttl_seconds=1800,
+        action_intent_ttl_seconds=300,
+    )
+
+    answer = await coordinator.answer(
+        MetaStudioChatCommand(
+            messages=(MetaStudioTurn("社保卡补领怎么办"),),
+            app_id="app01",
+            user="anonymous",
+            chat_id="chat-navigation",
+            is_stream=True,
+            client_id=str(client_session_id),
+        )
+    )
+
+    assert repository.created is not None
+    assert repository.created["type"] == "OPEN_SERVICE_NAVIGATION"
+    assert repository.created["section"] == "services"
+    assert repository.created["prefill"] == {"service_id": str(service_id)}
+    extend = json.loads(answer.extend_param or "{}")
+    assert set(extend) == {
+        "v",
+        "intent_id",
+        "type",
+        "label",
+        "expires_at",
+        "requires_confirmation",
+    }
+    assert "service_id" not in extend
+    assert "window" not in repr(extend).lower()
+
+
+@pytest.mark.asyncio
+async def test_history_and_model_navigation_text_cannot_create_public_intent() -> None:
+    sessions = MemorySessionStore()
+    client_session_id = uuid4()
+    service_id = uuid4()
+    sessions.values[client_session_id] = {
+        "context_expires_at": "2099-01-01T00:00:00+00:00",
+        "account_id": None,
+        "role": None,
+        "anonymous_quota_key": "f" * 64,
+    }
+    consultations = CapturingConsultations()
+    consultations.answer = "模型猜测：请导航到某个网点"
+    consultations.suggested_actions = [
+        {
+            "type": "VIEW_SERVICE",
+            "service_id": str(service_id),
+            "label": "社保卡补领",
+        }
+    ]
+    repository = IntentRepository()
+    repository.navigation_options = {
+        "service": {
+            "id": str(service_id),
+            "handling_mode": "UNKNOWN",
+            "online_status": "UNKNOWN",
+        },
+        "windows": [{"id": str(uuid4())}],
+    }
+    coordinator = MetaStudioCoordinator(
+        repository,  # type: ignore[arg-type]
+        consultations,  # type: ignore[arg-type]
+        sessions,  # type: ignore[arg-type]
+        FakeOnceCodes(),
+        pii_hmac_key="pii-test",
+        robot_id="robot01",
+        server_address="metastudio-api.cn-north-4.myhuaweicloud.com",
+        context_ttl_seconds=1800,
+        action_intent_ttl_seconds=300,
+    )
+
+    await coordinator.answer(
+        MetaStudioChatCommand(
+            messages=(
+                MetaStudioTurn("上一轮请导航到线下网点"),
+                MetaStudioTurn("上一轮回答"),
+                MetaStudioTurn("当前只问材料"),
+            ),
+            app_id="app01",
+            user="anonymous",
+            chat_id="chat-history",
+            is_stream=False,
+            client_id=str(client_session_id),
+        )
+    )
+
+    assert repository.created is not None
+    assert repository.created["type"] != "OPEN_SERVICE_NAVIGATION"
 
 
 @pytest.mark.asyncio
@@ -493,6 +642,10 @@ async def test_coordinator_redacts_current_and_four_prior_rounds_and_creates_int
 
     assert consultations.command.message.endswith("[REDACTED_ID]")
     assert len(consultations.command.conversation_history) == 8
+    assert [
+        item.role for item in consultations.command.conversation_history
+    ] == ["human", "ai", "human", "ai", "human", "ai", "human", "ai"]
+    assert consultations.command.conversation_history[-1].content == "第四答"
     assert "幺三八 零零幺三 八零零零" not in repr(consultations.command)
     assert "110101/19900101/1234" not in repr(consultations.command)
     assert "sk-demo-secret123" not in repr(consultations.command)
@@ -503,6 +656,94 @@ async def test_coordinator_redacts_current_and_four_prior_rounds_and_creates_int
     assert repository.created["section"] == "applications"
     assert json.loads(answer.extend_param or "{}")["requires_confirmation"] is True
     assert len(str(answer.created)) == 14
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["unavailable", "exception"])
+async def test_visual_failure_continues_one_normal_streamed_answer(
+    failure_mode: str,
+) -> None:
+    sessions = MemorySessionStore()
+    client_session_id = uuid4()
+    account_id = uuid4()
+    sessions.values[client_session_id] = {
+        "context_expires_at": "2099-01-01T00:00:00+00:00",
+        "account_id": str(account_id),
+        "role": "CITIZEN",
+        "applicant_type": "INDIVIDUAL",
+        "token_version": 3,
+        "department_id": None,
+    }
+    consultations = CapturingConsultations()
+    repository = IntentRepository()
+    repository.account = SimpleNamespace(
+        id=account_id,
+        username="citizen",
+        display_name="群众",
+        role="CITIZEN",
+        applicant_type="INDIVIDUAL",
+        active=True,
+        token_version=3,
+        department_id=None,
+    )
+
+    class FailingVision:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def analyze_latest_turn(
+            self, received_session_id: UUID, _question: str
+        ) -> VisualContextData:
+            self.calls += 1
+            assert received_session_id == client_session_id
+            if failure_mode == "exception":
+                raise RuntimeError("vision provider failed")
+            return VisualContextData(
+                client_session_id=client_session_id,
+                turn_sequence=1,
+                frame_count=1,
+                scene="",
+                available=False,
+            )
+
+    vision = FailingVision()
+    coordinator = MetaStudioCoordinator(
+        repository,  # type: ignore[arg-type]
+        consultations,  # type: ignore[arg-type]
+        sessions,  # type: ignore[arg-type]
+        FakeOnceCodes(),
+        pii_hmac_key="pii-test",
+        robot_id="robot01",
+        server_address="metastudio-api.cn-north-4.myhuaweicloud.com",
+        context_ttl_seconds=1800,
+        action_intent_ttl_seconds=300,
+        vision=vision,  # type: ignore[arg-type]
+    )
+    deltas: list[str] = []
+
+    async def capture_delta(value: str) -> None:
+        deltas.append(value)
+
+    answer = await coordinator.answer(
+        MetaStudioChatCommand(
+            messages=(MetaStudioTurn("这个怎么办？"),),
+            app_id="app01",
+            user="ignored-provider-user",
+            chat_id="chat-visual-failure",
+            is_stream=True,
+            client_id=str(client_session_id),
+        ),
+        on_delta=capture_delta,
+    )
+
+    assert vision.calls == 1
+    assert consultations.calls == 1
+    assert consultations.command.visual_context is None
+    assert answer.content == "演示回答"
+    assert deltas == ["增量"]
+    assert answer.chat_result.warnings == [
+        "visual_unavailable: 本轮视觉信息不可用，已继续处理用户问题"
+    ]
 
 
 @pytest.mark.asyncio
@@ -571,6 +812,223 @@ async def test_exchange_requires_live_matching_client_session() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_anonymous_exchange_allows_only_fresh_grounded_public_navigation() -> None:
+    sessions = MemorySessionStore()
+    session_id = uuid4()
+    service_id = uuid4()
+    sessions.values[session_id] = {
+        "context_expires_at": "2099-01-01T00:00:00+00:00",
+        "account_id": None,
+        "role": None,
+        "anonymous_quota_key": "c" * 64,
+    }
+    repository = IntentRepository()
+    repository.consume_result = {
+        "type": "OPEN_SERVICE_NAVIGATION",
+        "label": "untrusted stored label",
+        "section": "services",
+        "prefill": {"service_id": str(service_id)},
+    }
+    repository.navigation_options = {
+        "service": {
+            "id": str(service_id),
+            "handling_mode": "BOTH",
+            "online_status": "AVAILABLE",
+        },
+        "windows": [{"id": str(uuid4())}],
+        "demo_only": True,
+    }
+    coordinator = MetaStudioCoordinator(
+        repository,  # type: ignore[arg-type]
+        CapturingConsultations(),  # type: ignore[arg-type]
+        sessions,  # type: ignore[arg-type]
+        FakeOnceCodes(),
+        pii_hmac_key="pii-test",
+        robot_id="robot01",
+        server_address="metastudio-api.cn-north-4.myhuaweicloud.com",
+        context_ttl_seconds=1800,
+        action_intent_ttl_seconds=300,
+    )
+    intent_id = uuid4()
+
+    result = await coordinator.exchange_intent(
+        None, intent_id, session_id, "anonymous-semantic-turn"
+    )
+
+    assert result == {
+        "intent_id": intent_id,
+        "type": "OPEN_SERVICE_NAVIGATION",
+        "label": "前往事项服务查看线下网点",
+        "section": "services",
+        "prefill": {"service_id": str(service_id)},
+        "requires_confirmation": True,
+    }
+    assert repository.consumed is not None
+    consumed_args = repository.consumed["args"]
+    assert consumed_args[1] is None
+    assert consumed_args[2] is None
+    assert repository.consumed["kwargs"] == {
+        "required_intent_type": "OPEN_SERVICE_NAVIGATION"
+    }
+
+    repository.consume_result = {
+        "type": "OPEN_SERVICES",
+        "label": "前往事项服务",
+        "section": "services",
+        "prefill": {},
+    }
+    with pytest.raises(AuthenticationRequired):
+        await coordinator.exchange_intent(
+            None, uuid4(), session_id, "anonymous-generic-intent"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [None, Role.CITIZEN, Role.STAFF, Role.ADMIN])
+async def test_grounded_public_navigation_exchange_is_available_to_every_role(
+    role: Role | None,
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = uuid4()
+    service_id = uuid4()
+    account_id = uuid4() if role is not None else None
+    sessions.values[session_id] = {
+        "context_expires_at": "2099-01-01T00:00:00+00:00",
+        "account_id": str(account_id) if account_id is not None else None,
+        "role": role.value if role is not None else None,
+        "applicant_type": (
+            "INDIVIDUAL" if role is Role.CITIZEN else None
+        ),
+        "token_version": 4 if role is not None else None,
+        "department_id": None,
+        "anonymous_quota_key": "e" * 64,
+    }
+    repository = IntentRepository()
+    if role is not None:
+        repository.account = SimpleNamespace(
+            id=account_id,
+            username=f"{role.value.lower()}-user",
+            display_name="演示用户",
+            role=role.value,
+            applicant_type=("INDIVIDUAL" if role is Role.CITIZEN else None),
+            active=True,
+            token_version=4,
+            department_id=None,
+        )
+    repository.consume_result = {
+        "type": "OPEN_SERVICE_NAVIGATION",
+        "label": "前往事项服务查看线下网点",
+        "section": "services",
+        "prefill": {"service_id": str(service_id)},
+    }
+    repository.navigation_options = {
+        "service": {
+            "id": str(service_id),
+            "handling_mode": "UNKNOWN",
+            "online_status": "UNKNOWN",
+        },
+        "windows": [{"id": str(uuid4())}],
+    }
+    coordinator = MetaStudioCoordinator(
+        repository,  # type: ignore[arg-type]
+        CapturingConsultations(),  # type: ignore[arg-type]
+        sessions,  # type: ignore[arg-type]
+        FakeOnceCodes(),
+        pii_hmac_key="pii-test",
+        robot_id="robot01",
+        server_address="metastudio-api.cn-north-4.myhuaweicloud.com",
+        context_ttl_seconds=1800,
+        action_intent_ttl_seconds=300,
+    )
+    principal = (
+        Principal(
+            account_id=account_id,
+            username=f"{role.value.lower()}-user",
+            display_name="演示用户",
+            role=role,
+            applicant_type=(
+                ApplicantType.INDIVIDUAL if role is Role.CITIZEN else None
+            ),
+            token_version=4,
+        )
+        if role is not None and account_id is not None
+        else None
+    )
+
+    result = await coordinator.exchange_intent(
+        principal, uuid4(), session_id, "public-navigation"
+    )
+
+    assert result["type"] == "OPEN_SERVICE_NAVIGATION"
+    assert result["prefill"] == {"service_id": str(service_id)}
+    assert repository.consumed is not None
+    assert repository.consumed["kwargs"]["required_intent_type"] == (
+        "OPEN_SERVICE_NAVIGATION" if role is None else None
+    )
+
+
+@pytest.mark.asyncio
+async def test_anonymous_navigation_exchange_rejects_unsafe_prefill_and_stale_session() -> None:
+    sessions = MemorySessionStore()
+    session_id = uuid4()
+    service_id = uuid4()
+    sessions.values[session_id] = {
+        "context_expires_at": "2099-01-01T00:00:00+00:00",
+        "account_id": None,
+        "role": None,
+        "anonymous_quota_key": "d" * 64,
+    }
+    repository = IntentRepository()
+    repository.consume_result = {
+        "type": "OPEN_SERVICE_NAVIGATION",
+        "label": "前往网点",
+        "section": "services",
+        "prefill": {
+            "service_id": str(service_id),
+            "latitude": "31.2304",
+        },
+    }
+    repository.navigation_options = {
+        "service": {
+            "id": str(service_id),
+            "handling_mode": "OFFLINE_ONLY",
+            "online_status": "UNKNOWN",
+        },
+        "windows": [{"id": str(uuid4())}],
+    }
+    coordinator = MetaStudioCoordinator(
+        repository,  # type: ignore[arg-type]
+        CapturingConsultations(),  # type: ignore[arg-type]
+        sessions,  # type: ignore[arg-type]
+        FakeOnceCodes(),
+        pii_hmac_key="pii-test",
+        robot_id="robot01",
+        server_address="metastudio-api.cn-north-4.myhuaweicloud.com",
+        context_ttl_seconds=1800,
+        action_intent_ttl_seconds=300,
+    )
+
+    with pytest.raises(ResourceNotFound):
+        await coordinator.exchange_intent(
+            None, uuid4(), session_id, "unsafe-prefill"
+        )
+
+    repository.consume_result["prefill"] = {"service_id": str(service_id)}
+    assert repository.navigation_options is not None
+    repository.navigation_options["windows"] = []
+    with pytest.raises(ResourceNotFound):
+        await coordinator.exchange_intent(
+            None, uuid4(), session_id, "no-active-location"
+        )
+
+    sessions.values.pop(session_id)
+    with pytest.raises(ResourceNotFound):
+        await coordinator.exchange_intent(
+            None, uuid4(), session_id, "stale-session"
+        )
+
+
 def test_intent_policy_never_emits_arbitrary_navigation() -> None:
     policy = DigitalHumanIntentPolicy()
     proposal = policy.propose(
@@ -582,6 +1040,125 @@ def test_intent_policy_never_emits_arbitrary_navigation() -> None:
     assert proposal.intent_type == "NAVIGATE"
     assert proposal.section == "admin_people"
     assert "url" not in proposal.prefill
+
+
+def _grounded_navigation_input(
+    *,
+    handling_mode: str = "UNKNOWN",
+    online_status: str = "UNKNOWN",
+    has_active_locations: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    service_id = uuid4()
+    return (
+        [
+            {
+                "type": "VIEW_SERVICE",
+                "service_id": str(service_id),
+                "label": "社保卡补领",
+            }
+        ],
+        {
+            "service_id": str(service_id),
+            "published": True,
+            "has_active_locations": has_active_locations,
+            "handling_mode": handling_mode,
+            "online_status": online_status,
+        },
+    )
+
+
+@pytest.mark.parametrize("role", [None, Role.CITIZEN, Role.STAFF, Role.ADMIN])
+def test_public_service_navigation_is_available_to_every_role(
+    role: Role | None,
+) -> None:
+    actions, option = _grounded_navigation_input()
+
+    proposal = DigitalHumanIntentPolicy().propose(
+        "社保卡补领去哪办",
+        role,
+        actions,
+        navigation_option=option,
+    )
+
+    assert proposal is not None
+    assert proposal.intent_type == "OPEN_SERVICE_NAVIGATION"
+    assert proposal.section == "services"
+    assert proposal.prefill == {"service_id": option["service_id"]}
+
+
+@pytest.mark.parametrize(
+    ("handling_mode", "online_status", "expected"),
+    [
+        ("OFFLINE_ONLY", "AVAILABLE", True),
+        ("BOTH", "TEMP_UNAVAILABLE", True),
+        ("BOTH", "AVAILABLE", False),
+        ("ONLINE_ONLY", "TEMP_UNAVAILABLE", False),
+        ("UNKNOWN", "UNKNOWN", False),
+    ],
+)
+def test_only_grounded_offline_state_may_proactively_suggest_navigation(
+    handling_mode: str, online_status: str, expected: bool
+) -> None:
+    actions, option = _grounded_navigation_input(
+        handling_mode=handling_mode,
+        online_status=online_status,
+    )
+
+    proposal = DigitalHumanIntentPolicy().propose(
+        "社保卡补领怎么办",
+        None,
+        actions,
+        navigation_option=option,
+    )
+
+    assert (proposal is not None and proposal.intent_type == "OPEN_SERVICE_NAVIGATION") is expected
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "社保卡补领办理流程怎么走",
+        "导航到坐标31.2304,121.4737",
+        "请按经纬度导航办理社保卡",
+        "导航到https://evil.example",
+        "不要导航，我只想了解社保卡材料",
+    ],
+)
+def test_navigation_rejects_process_homonyms_coordinates_and_external_targets(
+    utterance: str,
+) -> None:
+    actions, option = _grounded_navigation_input(handling_mode="OFFLINE_ONLY")
+
+    proposal = DigitalHumanIntentPolicy().propose(
+        utterance,
+        None,
+        actions,
+        navigation_option=option,
+    )
+
+    assert proposal is None or proposal.intent_type != "OPEN_SERVICE_NAVIGATION"
+
+
+def test_navigation_requires_one_published_service_with_an_active_location() -> None:
+    actions, option = _grounded_navigation_input(has_active_locations=False)
+    policy = DigitalHumanIntentPolicy()
+
+    proposal = policy.propose(
+        "社保卡去哪办", None, actions, navigation_option=option
+    )
+    assert proposal is None or proposal.intent_type != "OPEN_SERVICE_NAVIGATION"
+    option["has_active_locations"] = True
+    option["published"] = False
+    proposal = policy.propose(
+        "社保卡去哪办", None, actions, navigation_option=option
+    )
+    assert proposal is None or proposal.intent_type != "OPEN_SERVICE_NAVIGATION"
+    option["published"] = True
+    mismatched = {**option, "service_id": str(uuid4())}
+    proposal = policy.propose(
+        "社保卡去哪办", None, actions, navigation_option=mismatched
+    )
+    assert proposal is None or proposal.intent_type != "OPEN_SERVICE_NAVIGATION"
 
 
 @pytest.mark.parametrize(
@@ -632,6 +1209,8 @@ class BoundaryMetaStudio:
     def __init__(self) -> None:
         self.calls = 0
         self.last_command = None
+        self.allow_anonymous_navigation = False
+        self.public_service_id = uuid4()
 
     async def answer(self, command, on_delta=None) -> MetaStudioAnswer:
         self.calls += 1
@@ -667,6 +1246,17 @@ class BoundaryMetaStudio:
     async def exchange_intent(
         self, _principal, intent_id, _session_id, _chat_id
     ) -> dict[str, Any]:
+        if _principal is None:
+            if not self.allow_anonymous_navigation:
+                raise AuthenticationRequired("请先登录后继续")
+            return {
+                "intent_id": intent_id,
+                "type": "OPEN_SERVICE_NAVIGATION",
+                "label": "前往事项服务查看线下网点",
+                "section": "services",
+                "prefill": {"service_id": str(self.public_service_id)},
+                "requires_confirmation": True,
+            }
         return {
             "intent_id": intent_id,
             "type": "NAVIGATE",
@@ -994,7 +1584,40 @@ def test_callback_quota_failure_is_fail_closed_before_model() -> None:
     assert services.meta.calls == 0
 
 
-def test_action_intent_exchange_requires_bearer_and_returns_closed_command() -> None:
+class UnboundQuotaMeta(BoundaryMetaStudio):
+    async def quota_identity(self, _client_id):
+        return None, None
+
+
+def test_unbound_provider_callbacks_share_one_conservative_quota_bucket() -> None:
+    services = BoundaryServices()
+    services.meta = UnboundQuotaMeta()
+    services.business.metastudio = services.meta
+    quota = CapturingQuota()
+    services.chat_quota = quota
+    first = llm_body(False)
+    second = llm_body(False)
+    first["user"] = "provider-session-one"
+    second["user"] = "provider-session-two"
+    with TestClient(create_app(services)) as client:
+        first_response = client.post(
+            "/api/v1/integrations/metastudio/llm?secret=x&time_stamp=1",
+            json=first,
+        )
+        second_response = client.post(
+            "/api/v1/integrations/metastudio/llm?secret=x&time_stamp=1",
+            json=second,
+        )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert quota.calls == [
+        (None, "metastudio-provider:unbound"),
+        (None, "metastudio-provider:unbound"),
+    ]
+
+
+def test_action_intent_exchange_keeps_login_boundary_except_public_navigation() -> None:
     services = BoundaryServices()
     intent_id = uuid4()
     body = {"session_id": str(uuid4()), "chat_id": "chat01"}
@@ -1004,6 +1627,8 @@ def test_action_intent_exchange_requires_bearer_and_returns_closed_command() -> 
         authenticated = client.post(
             url, json=body, headers={"Authorization": "Bearer access-token"}
         )
+        services.meta.allow_anonymous_navigation = True
+        public_navigation = client.post(url, json=body)
 
     assert anonymous.status_code == 401
     assert authenticated.status_code == 200
@@ -1013,6 +1638,15 @@ def test_action_intent_exchange_requires_bearer_and_returns_closed_command() -> 
         "label": "前往办件确认",
         "section": "applications",
         "prefill": {},
+        "requires_confirmation": True,
+    }
+    assert public_navigation.status_code == 200
+    assert public_navigation.json() == {
+        "intent_id": str(intent_id),
+        "type": "OPEN_SERVICE_NAVIGATION",
+        "label": "前往事项服务查看线下网点",
+        "section": "services",
+        "prefill": {"service_id": str(services.meta.public_service_id)},
         "requires_confirmation": True,
     }
 
@@ -1073,15 +1707,15 @@ def repository_with_intent(record: DigitalHumanActionIntentRecord):
 
 def make_intent(
     *,
-    owner_id: UUID,
-    role: Role = Role.CITIZEN,
+    owner_id: UUID | None,
+    role: Role | None = Role.CITIZEN,
     session_id: UUID | None = None,
     expires_at: datetime | None = None,
 ) -> DigitalHumanActionIntentRecord:
     return DigitalHumanActionIntentRecord(
         id=uuid4(),
         owner_account_id=owner_id,
-        owner_role=role.value,
+        owner_role=role.value if role is not None else None,
         client_session_id=session_id or uuid4(),
         chat_id_hash="provider-conversation-hash",
         intent_type="NAVIGATE",
@@ -1091,6 +1725,91 @@ def make_intent(
         status="ACTIVE",
         expires_at=expires_at or datetime.now(timezone.utc) + timedelta(minutes=5),
     )
+
+
+@pytest.mark.asyncio
+async def test_repository_anonymous_type_and_shape_checks_happen_before_consumption() -> None:
+    session_id = uuid4()
+    now = datetime.now(timezone.utc)
+    generic = make_intent(owner_id=None, role=None, session_id=session_id)
+    repository, _ = repository_with_intent(generic)
+
+    with pytest.raises(AuthenticationRequired):
+        await repository.consume_digital_human_intent(
+            generic.id,
+            None,
+            None,
+            session_id,
+            "anonymous-turn",
+            now,
+            required_intent_type="OPEN_SERVICE_NAVIGATION",
+        )
+    assert generic.status == "ACTIVE"
+    assert generic.consumed_at is None
+
+    navigation = make_intent(owner_id=None, role=None, session_id=session_id)
+    navigation.intent_type = "OPEN_SERVICE_NAVIGATION"
+    navigation.section = "services"
+    navigation.prefill_json = {"service_id": str(uuid4()), "latitude": "31.2"}
+    repository, _ = repository_with_intent(navigation)
+
+    with pytest.raises(ResourceNotFound):
+        await repository.consume_digital_human_intent(
+            navigation.id,
+            None,
+            None,
+            session_id,
+            "anonymous-turn",
+            now,
+            required_intent_type="OPEN_SERVICE_NAVIGATION",
+        )
+    assert navigation.status == "ACTIVE"
+    assert navigation.consumed_at is None
+
+    navigation.prefill_json = {"service_id": str(uuid4())}
+    result = await repository.consume_digital_human_intent(
+        navigation.id,
+        None,
+        None,
+        session_id,
+        "anonymous-turn",
+        now,
+        required_intent_type="OPEN_SERVICE_NAVIGATION",
+    )
+    assert result["type"] == "OPEN_SERVICE_NAVIGATION"
+    assert navigation.status == "CONSUMED"
+    with pytest.raises(ConflictError):
+        await repository.consume_digital_human_intent(
+            navigation.id,
+            None,
+            None,
+            session_id,
+            "anonymous-replay",
+            now,
+            required_intent_type="OPEN_SERVICE_NAVIGATION",
+        )
+
+    expired = make_intent(
+        owner_id=None,
+        role=None,
+        session_id=session_id,
+        expires_at=now - timedelta(seconds=1),
+    )
+    expired.intent_type = "OPEN_SERVICE_NAVIGATION"
+    expired.section = "services"
+    expired.prefill_json = {"service_id": str(uuid4())}
+    repository, _ = repository_with_intent(expired)
+    with pytest.raises(ConflictError, match="已过期"):
+        await repository.consume_digital_human_intent(
+            expired.id,
+            None,
+            None,
+            session_id,
+            "anonymous-expired",
+            now,
+            required_intent_type="OPEN_SERVICE_NAVIGATION",
+        )
+    assert expired.status == "ACTIVE"
 
 
 @pytest.mark.asyncio

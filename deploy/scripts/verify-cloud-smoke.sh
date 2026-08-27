@@ -18,9 +18,11 @@ while [ "$#" -gt 0 ]; do
         *) die "Unknown cloud smoke option: $1" ;;
     esac
 done
-[ "$confirm" = true ] || die "The final smoke makes one paid DeepSeek call; pass --confirm-paid-chat after cost approval."
 
-"${SCRIPT_DIR}/health-check.sh" --timeout 120 --expect-rag enabled
+"${SCRIPT_DIR}/health-check.sh" --timeout 120 --expect-rag enabled \
+    --worker-service material-worker
+log "Non-paid readiness and reviewed material-template pack checks passed."
+[ "$confirm" = true ] || die "The final smoke makes one paid DeepSeek call; pass --confirm-paid-chat after cost approval."
 
 log "Running one paid, non-PII grounded chat plus catalogue and role-login checks."
 if ! cloud_compose exec -T api python - <<'PY'

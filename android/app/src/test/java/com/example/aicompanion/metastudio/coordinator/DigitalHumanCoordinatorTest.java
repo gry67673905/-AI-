@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class DigitalHumanCoordinatorTest {
     @Test
-    public void anonymousIntentRoutesToLoginWithoutPrivateExchange() {
+    public void anonymousNavigationIntentUsesOptionalExchangeAndStillRequiresConfirmation() {
         FakeGateway gateway = new FakeGateway();
         DigitalHumanCoordinator coordinator = new DigitalHumanCoordinator(gateway, Role.ANONYMOUS);
         coordinator.createSession(new GatewayCallback<ClientSession>() {
@@ -34,9 +34,9 @@ public class DigitalHumanCoordinatorTest {
         coordinator.exchange(new SemanticIntent("chat-1", "intent-1"), exchange(result, failure));
 
         assertNull(failure.get());
-        assertEquals("login", result.get().getSection());
-        assertEquals("OPEN_LOGIN", result.get().getType());
-        assertEquals(0, gateway.exchangeCalls.get());
+        assertEquals("services", result.get().getSection());
+        assertEquals("OPEN_SERVICE_NAVIGATION", result.get().getType());
+        assertEquals(1, gateway.exchangeCalls.get());
     }
 
     @Test
@@ -84,9 +84,10 @@ public class DigitalHumanCoordinatorTest {
         ) {
             exchangeCalls.incrementAndGet();
             callback.onSuccess(com.google.gson.JsonParser.parseString(
-                "{\"intent_id\":\"intent-1\",\"type\":\"OPEN_APPLICATION\","
-                    + "\"label\":\"查看办件\",\"section\":\"applications\","
-                    + "\"prefill\":{},\"requires_confirmation\":true}"
+                "{\"intent_id\":\"intent-1\",\"type\":\"OPEN_SERVICE_NAVIGATION\","
+                    + "\"label\":\"导航到服务网点\",\"section\":\"services\","
+                    + "\"prefill\":{\"service_id\":\"11111111-1111-4111-8111-111111111111\"},"
+                    + "\"requires_confirmation\":true}"
             ));
         }
     }

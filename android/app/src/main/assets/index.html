@@ -6,7 +6,7 @@
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'">
     <title>智慧政务一网办助手</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=portal-20260827-contextual-chat-1">
 </head>
 <body>
 <header class="app-header">
@@ -24,29 +24,49 @@
 
 <div id="global-alert" class="alert" role="alert" hidden></div>
 
+<aside id="digital-human-navigation-confirmation" class="confirmation-card" role="dialog"
+       aria-labelledby="digital-human-navigation-title" hidden>
+    <h2 id="digital-human-navigation-title">确认打开原生导航</h2>
+    <p id="digital-human-navigation-label">数字人建议查看事项服务网点。</p>
+    <p class="muted">确认后仅把事项编号交给 Android；网点由原生页重新查询，当前位置不会进入 WebView 或项目后端。</p>
+    <div class="button-row wrap">
+        <button id="digital-human-navigation-confirm" type="button" data-native-action>确认并打开</button>
+        <button id="digital-human-navigation-cancel" type="button" class="quiet">取消</button>
+    </div>
+</aside>
+
 <nav id="primary-nav" aria-label="工作台导航"></nav>
 
 <main>
     <section id="section-consultation" class="workspace" data-section="consultation">
         <div class="section-heading">
             <div><p class="eyebrow">AI 咨询</p><h2>政策与办事咨询</h2></div>
-            <span class="demo-label">回答仅供演示参考</span>
-        </div>
-        <form id="chat-form">
-            <label for="chat-message">请输入要咨询的事项</label>
-            <textarea id="chat-message" maxlength="1000" required placeholder="例如：补办身份证需要准备哪些材料？"></textarea>
-            <div class="button-row">
-                <button id="chat-send" type="submit" data-native-action>发送问题</button>
-                <button id="voice-start" type="button" class="secondary" data-native-action>开始语音</button>
-                <button id="voice-stop" type="button" class="quiet" data-native-action>停止语音</button>
+            <div class="button-row wrap chat-heading-actions">
+                <button id="chat-history-toggle" type="button" class="quiet citizen-only" data-native-action hidden>历史对话</button>
+                <button id="chat-new" type="button" class="quiet" data-native-action>新对话</button>
             </div>
-            <p id="voice-status" class="muted">原始音频不会上传到政务后端。</p>
-        </form>
-        <article class="result-card" aria-live="polite">
-            <h3>助手答复</h3>
-            <p id="chat-answer">答复将在这里显示。</p>
-            <details><summary>来源与调用信息</summary><pre id="chat-metadata">暂无</pre></details>
-        </article>
+        </div>
+        <div class="chat-layout">
+            <aside id="chat-history-panel" class="chat-history" hidden aria-label="历史对话">
+                <div class="chat-history-title"><strong>历史对话</strong><span class="muted">登录后可跨重启恢复</span></div>
+                <div id="chat-history-list" class="chat-history-list"><p class="muted">点击“历史对话”加载。</p></div>
+            </aside>
+            <div class="chat-main">
+                <ol id="chat-transcript" class="chat-transcript" role="log" aria-live="polite" aria-relevant="additions text">
+                    <li id="chat-empty" class="chat-empty">可以连续追问，也可以问我“有没有材料模板”。</li>
+                </ol>
+                <form id="chat-form" class="chat-composer">
+                    <label for="chat-message">咨询内容</label>
+                    <textarea id="chat-message" maxlength="1000" required placeholder="例如：补办身份证有没有可以填写的模板？"></textarea>
+                    <div class="button-row">
+                        <button id="chat-send" type="submit" data-native-action>发送</button>
+                        <button id="voice-start" type="button" class="secondary" data-native-action>开始语音</button>
+                        <button id="voice-stop" type="button" class="quiet" data-native-action>停止语音</button>
+                    </div>
+                    <p id="voice-status" class="muted">原始音频不会上传到政务后端。</p>
+                </form>
+            </div>
+        </div>
         <div class="citizen-only compact-grid" hidden>
             <form id="handoff-form" class="card">
                 <h3>转人工咨询</h3>
@@ -100,15 +120,18 @@
                 <button id="service-windows" type="button" data-native-action>服务窗口</button>
             </div>
         </form>
-        <form id="window-map-form" class="card inline-form">
-            <label for="window-id">在地图查看窗口（仅传窗口编号）</label>
-            <input id="window-id" required>
-            <button type="submit" class="secondary" data-native-action>打开 HMS 地图</button>
+        <form id="service-navigation-form" class="card inline-form">
+            <label for="service-navigation-id">原生路线导航（仅传事项 UUID）</label>
+            <input id="service-navigation-id" required placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+            <button type="submit" data-native-action>选择附近网点</button>
         </form>
     </section>
 
     <section id="section-login" class="workspace" data-section="login" hidden>
-        <div class="section-heading"><div><p class="eyebrow">本地演示账号</p><h2>登录与群众注册</h2></div></div>
+        <div class="section-heading">
+            <div><p class="eyebrow">本地演示账号</p><h2>登录与群众注册</h2></div>
+            <button id="login-show-register" type="button" class="quiet" aria-controls="register-form">新用户注册</button>
+        </div>
         <div class="compact-grid">
             <form id="login-form" class="card">
                 <h3>账号登录</h3>
@@ -157,6 +180,29 @@
             <label for="requirement-id">材料要求编号</label><input id="requirement-id">
             <button id="material-pick" type="button" class="secondary" data-native-action>选择 PDF/JPEG/PNG 材料（≤10MB）</button>
         </form>
+        <section class="card material-template-panel" aria-labelledby="material-template-title">
+            <h3 id="material-template-title">生成可填写 Word</h3>
+            <p class="muted">仅生成项目演示模板，不作为正式政务表格。请先保存合成演示表单，再从当前事项的材料清单选择可生成项。</p>
+            <button id="material-template-load" type="button" class="quiet" data-native-action>加载当前事项的材料模板</button>
+            <div id="material-template-options" class="material-template-options" aria-live="polite">
+                <p class="muted">尚未加载模板清单。</p>
+            </div>
+            <label for="material-template-id">已选模板编号</label>
+            <input id="material-template-id" readonly placeholder="请从上方选择可生成材料">
+            <label for="material-template-request">补充生成要求（可选，最多 300 字）</label>
+            <textarea id="material-template-request" maxlength="300" placeholder="例如：将联系人、单位名称和日期预填到空白位置"></textarea>
+            <button id="material-template-generate" type="button" data-native-action>生成可填写 Word</button>
+            <article id="material-generation-card" class="material-generation-card" hidden aria-live="polite">
+                <p><strong id="material-generation-state">等待生成</strong></p>
+                <p id="material-generation-detail" class="muted"></p>
+                <label for="material-generation-id">生成任务编号</label>
+                <input id="material-generation-id" readonly>
+                <div class="button-row wrap">
+                    <button id="material-generation-refresh" type="button" class="quiet" data-native-action>刷新状态</button>
+                    <button id="material-generation-save" type="button" class="secondary" disabled>保存并打开 DOCX</button>
+                </div>
+            </article>
+        </section>
         <div class="compact-grid">
             <form id="appointment-form" class="card"><h3>预约窗口</h3><label for="appointment-service">事项编号</label><input id="appointment-service" required><label for="appointment-window">窗口编号</label><input id="appointment-window" required><label for="appointment-time">预约时间</label><input id="appointment-time" type="datetime-local" required><button type="submit" data-native-action>预约</button><label for="appointment-id">预约编号</label><input id="appointment-id"><div class="button-row wrap"><button id="appointment-list" type="button" class="quiet" data-native-action>我的预约</button><button id="appointment-cancel" type="button" class="danger" data-native-action>取消预约</button></div></form>
             <form id="payment-form" class="card"><h3>演示支付</h3><label for="payment-application">办件编号</label><input id="payment-application" required><button id="payment-create" type="button" data-native-action>创建支付单</button><label for="payment-id">支付单编号</label><input id="payment-id"><div class="button-row wrap"><button id="payment-confirm" type="button" class="secondary" data-native-action>确认模拟支付</button><button id="payment-cancel" type="button" class="danger" data-native-action>取消支付单</button></div></form>
@@ -220,6 +266,7 @@
     </section>
 </main>
 
-<script src="app.js"></script>
+<script src="material-poll-policy.js?v=portal-20260827-contextual-chat-1"></script>
+<script src="portal-app-v2.js?v=portal-20260827-contextual-chat-1"></script>
 </body>
 </html>

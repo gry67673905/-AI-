@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -37,6 +39,7 @@ from app.boundaries.business_schemas import (
     LoginRequest,
     LogoutRequest,
     MaterialEvaluationRequest,
+    MaterialDocumentCreateRequest,
     PaymentAdvanceRequest,
     PaymentCreateRequest,
     RefreshRequest,
@@ -51,7 +54,7 @@ from app.boundaries.business_schemas import (
     VerificationCreateRequest,
     WindowCreateRequest,
 )
-from app.boundaries.chat_mapping import source_payload, to_chat_command
+from app.boundaries.chat_mapping import source_payload, to_chat_command, ui_card_payload
 from app.application.dtos import Principal
 from app.domain.enums import (
     AppointmentStatus,
@@ -61,7 +64,7 @@ from app.domain.enums import (
     ServiceStatus,
 )
 from app.errors import AuthenticationRequired, BusinessValidationError, PermissionDenied
-from app.schemas import ChatRequest
+from app.schemas import ChatRequest, ConsultationMessagePage
 
 
 _bearer = HTTPBearer(auto_error=False)
@@ -135,6 +138,11 @@ class CitizenPortalBoundary:
         self.router = APIRouter(tags=["群众一网办"])
         self.router.add_api_route("/services", self.search_services, methods=["GET"])
         self.router.add_api_route("/services/{service_id}", self.service_details, methods=["GET"])
+        self.router.add_api_route(
+            "/services/{service_id}/navigation-options",
+            self.navigation_options,
+            methods=["GET"],
+        )
         self.router.add_api_route("/services/{service_id}/eligibility", self.eligibility, methods=["POST"])
         self.router.add_api_route("/services/{service_id}/materials", self.materials, methods=["GET"])
         self.router.add_api_route("/services/{service_id}/materials/evaluate", self.evaluate_materials, methods=["POST"])
@@ -147,6 +155,27 @@ class CitizenPortalBoundary:
         self.router.add_api_route("/applications/{application_id}/form", self.update_form, methods=["PATCH"])
         self.router.add_api_route("/applications/{application_id}/materials", self.upload_material, methods=["POST"])
         self.router.add_api_route("/applications/{application_id}/materials/{material_id}", self.download_material, methods=["GET"])
+        self.router.add_api_route(
+            "/applications/{application_id}/material-template-options",
+            self.material_template_options,
+            methods=["GET"],
+        )
+        self.router.add_api_route(
+            "/applications/{application_id}/material-documents",
+            self.create_material_document,
+            methods=["POST"],
+            status_code=202,
+        )
+        self.router.add_api_route(
+            "/material-documents/{generation_id}",
+            self.material_document_status,
+            methods=["GET"],
+        )
+        self.router.add_api_route(
+            "/material-documents/{generation_id}/download",
+            self.download_material_document,
+            methods=["GET"],
+        )
         self.router.add_api_route("/applications/{application_id}/submit", self.submit, methods=["POST"])
         self.router.add_api_route("/applications/{application_id}/supplement", self.supplement, methods=["POST"])
         self.router.add_api_route("/applications/{application_id}/withdraw", self.withdraw, methods=["POST"])
@@ -154,6 +183,18 @@ class CitizenPortalBoundary:
         self.router.add_api_route("/applications/{application_id}/timeline", self.timeline, methods=["GET"])
         self.router.add_api_route("/applications/{application_id}/delivery", self.delivery, methods=["POST"])
         self.router.add_api_route("/consultations", self.consultations, methods=["GET"])
+        self.router.add_api_route(
+            "/consultations/{session_id}/messages",
+            self.consultation_messages,
+            methods=["GET"],
+            response_model=ConsultationMessagePage,
+        )
+        self.router.add_api_route(
+            "/consultations/{session_id}/material-intents/{intent_id}/confirm",
+            self.confirm_consultation_material_intent,
+            methods=["POST"],
+            status_code=202,
+        )
         self.router.add_api_route("/consultations/feedback", self.feedback, methods=["POST"])
         self.router.add_api_route("/consultations/handoffs", self.create_handoff, methods=["POST"])
         self.router.add_api_route("/consultations/handoffs", self.list_handoffs, methods=["GET"])
@@ -166,6 +207,13 @@ class CitizenPortalBoundary:
 
     async def service_details(self, service_id: UUID, request: Request) -> dict[str, Any]:
         return await _runtime(request).catalog.details(service_id)
+
+    async def navigation_options(
+        self, service_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        # Deliberately anonymous and location-free: clients choose an active
+        # window after loading this published public catalogue response.
+        return await _runtime(request).navigation.options(service_id)
 
     async def eligibility(self, service_id: UUID, payload: EligibilityRequest, request: Request) -> dict[str, Any]:
         return await _runtime(request).catalog.evaluate_eligibility(service_id, payload.answers)
@@ -252,6 +300,68 @@ class CitizenPortalBoundary:
             },
         )
 
+    async def material_template_options(
+        self,
+        application_id: UUID,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        return await runtime.material_documents.options(principal, application_id)
+
+    async def create_material_document(
+        self,
+        application_id: UUID,
+        payload: MaterialDocumentCreateRequest,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1, max_length=128)
+        ],
+    ) -> dict[str, Any]:
+        return await _runtime(request).material_documents.create(
+            principal,
+            application_id,
+            payload.requirement_code,
+            payload.template_id,
+            payload.request_text,
+            idempotency_key,
+        )
+
+    async def material_document_status(
+        self,
+        generation_id: UUID,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+    ) -> dict[str, Any]:
+        return await _runtime(request).material_documents.status(
+            principal, generation_id
+        )
+
+    async def download_material_document(
+        self,
+        generation_id: UUID,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+    ) -> Response:
+        content, metadata = await _runtime(request).material_documents.download(
+            principal, generation_id
+        )
+        filename = str(metadata.get("filename") or "demo-material.docx")
+        encoded = quote(filename, safe="")
+        return Response(
+            content=content,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded}",
+                "X-Content-SHA256": metadata["sha256"],
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     async def submit(self, application_id: UUID, payload: StatusWriteRequest, request: Request, principal: Annotated[Principal, Depends(current_principal)], idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)]) -> dict[str, Any]:
         return await _runtime(request).applications.submit(principal, application_id, payload.version, idempotency_key)
 
@@ -273,8 +383,58 @@ class CitizenPortalBoundary:
             idempotency_key,
         )
 
-    async def consultations(self, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> dict[str, Any]:
-        return await _runtime(request).consultations.list(principal)
+    async def consultations(
+        self,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+        cursor: UUID | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=20),
+    ) -> dict[str, Any]:
+        return await _runtime(request).consultations.list(
+            principal,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def consultation_messages(
+        self,
+        session_id: UUID,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+        before: UUID | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=50),
+    ) -> dict[str, Any]:
+        return await _runtime(request).consultations.messages(
+            principal,
+            session_id,
+            before=before,
+            limit=limit,
+        )
+
+    async def confirm_consultation_material_intent(
+        self,
+        session_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1, max_length=128)
+        ],
+    ) -> dict[str, Any]:
+        # This is the only public mutation for consultation material intents.
+        # The chat path can mint a pending intent but cannot invoke this method.
+        # The database intent is the authoritative idempotency unit. Requiring
+        # the header keeps all mutating client calls on the same explicit
+        # retry contract without adding a second, divergent key store.
+        _ = idempotency_key
+        result = await _runtime(request).material_documents.confirm_consultation_intent(
+            principal,
+            session_id,
+            intent_id,
+        )
+        # Defense in depth: never serialize a storage object key even if a
+        # future repository view grows additional internal fields.
+        return {key: value for key, value in result.items() if key != "object_key"}
 
     async def feedback(self, payload: FeedbackRequest, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> dict[str, Any]:
         return await _runtime(request).consultations.feedback(
@@ -360,6 +520,11 @@ class AdminConsoleBoundary:
         self.router.add_api_route("/services", self.create_service, methods=["POST"])
         self.router.add_api_route("/services/{service_id}/versions", self.create_version, methods=["POST"])
         self.router.add_api_route("/services/{service_id}/lifecycle", self.lifecycle, methods=["POST"])
+        self.router.add_api_route(
+            "/navigation-catalog/import",
+            self.import_navigation_catalog,
+            methods=["POST"],
+        )
         self.router.add_api_route("/knowledge", self.upload_knowledge, methods=["POST"])
         self.router.add_api_route("/knowledge/{job_id}/retry", self.retry_knowledge, methods=["POST"])
         self.router.add_api_route("/knowledge/{job_id}/archive", self.archive_knowledge, methods=["POST"])
@@ -417,6 +582,17 @@ class AdminConsoleBoundary:
             principal, service_id, ServiceStatus(payload.target_status),
             payload.version_id, idempotency_key,
         )
+
+    async def import_navigation_catalog(
+        self,
+        request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
+        file: Annotated[UploadFile, File()],
+        dry_run: bool = Query(default=True),
+    ) -> dict[str, Any]:
+        coordinator = _runtime(request).navigation
+        content = await file.read(coordinator.max_csv_bytes + 1)
+        return await coordinator.import_csv(principal, content, dry_run=dry_run)
 
     async def upload_knowledge(self, request: Request, principal: Annotated[Principal, Depends(current_principal)], file: Annotated[UploadFile, File()], title: Annotated[str, Form(min_length=1, max_length=200)], source: Annotated[str, Form(max_length=255)] = "demo://admin-upload") -> dict[str, Any]:
         self._admin(principal)
@@ -519,19 +695,92 @@ class VoiceStreamBoundary:
                 request.client.host if request.client is not None else "unknown",
             )
         coordinator = _runtime(request).consultations
+        command = to_chat_command(payload)
+        command = replace(
+            command,
+            request_id=uuid4(),
+            session_id=command.session_id or uuid4(),
+        )
 
         async def events():
+            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=64)
+
+            async def emit_delta(value: str) -> None:
+                if value:
+                    await queue.put(("delta", value))
+
+            async def produce() -> None:
+                try:
+                    result = await coordinator.chat(
+                        command,
+                        principal,
+                        on_delta=emit_delta,
+                    )
+                except Exception as exc:
+                    await queue.put(("error", exc))
+                else:
+                    await queue.put(("result", result))
+
+            producer = asyncio.create_task(produce())
             try:
-                result = await coordinator.chat(to_chat_command(payload), principal)
-                yield _sse("meta", {"request_id": result.request_id, "session_id": result.session_id, "sources": [source_payload(item) for item in result.sources], "candidate_services": result.candidate_services, "clarification_required": result.clarification_required, "demo_data": True})
-                for start in range(0, len(result.answer), 24):
-                    yield _sse("delta", {"text": result.answer[start:start + 24]})
-                    await asyncio.sleep(0)
-                yield _sse("done", {"request_id": result.request_id, "session_id": result.session_id, "warnings": result.warnings, "suggested_actions": result.suggested_actions})
-            except Exception as exc:
-                code = getattr(exc, "code", "stream_failed")
-                message = getattr(exc, "message", "流式咨询暂不可用")
-                yield _sse("error", {"code": code, "message": message})
+                yield _sse(
+                    "meta",
+                    {
+                        "request_id": command.request_id,
+                        "session_id": command.session_id,
+                        "sources": [],
+                        "candidate_services": [],
+                        "clarification_required": False,
+                        "demo_data": True,
+                    },
+                )
+                while True:
+                    kind, value = await queue.get()
+                    if kind == "delta":
+                        yield _sse("delta", {"text": value})
+                        continue
+                    if kind == "error":
+                        code = getattr(value, "code", "stream_failed")
+                        message = getattr(value, "message", "流式咨询暂不可用")
+                        yield _sse("error", {"code": code, "message": message})
+                        break
+                    result = value
+                    yield _sse(
+                        "meta",
+                        {
+                            "request_id": result.request_id,
+                            "session_id": result.session_id,
+                            "sources": [
+                                source_payload(item) for item in result.sources
+                            ],
+                            "candidate_services": result.candidate_services,
+                            "clarification_required": result.clarification_required,
+                            "demo_data": True,
+                        },
+                    )
+                    yield _sse(
+                        "done",
+                        {
+                            "request_id": result.request_id,
+                            "session_id": result.session_id,
+                            "user_message_id": result.user_message_id,
+                            "assistant_message_id": result.assistant_message_id,
+                            "answer": result.answer,
+                            "warnings": result.warnings,
+                            "suggested_actions": result.suggested_actions,
+                            "ui_cards": [
+                                ui_card_payload(card) for card in result.ui_cards
+                            ],
+                        },
+                    )
+                    break
+            finally:
+                if not producer.done():
+                    producer.cancel()
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
 
         return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

@@ -129,6 +129,29 @@ public class NativeGatewaysTest {
     }
 
     @Test
+    public void streamingGatewayRejectsEofWithoutTerminalEvent() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody("event: meta\ndata: {\"session_id\":\"session-1\"}\n\n"
+                + "event: delta\ndata: {\"text\":\"未完成\"}\n\n"));
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<ApiFailure> failure = new AtomicReference<>();
+        OkHttpStreamingGateway streaming = new OkHttpStreamingGateway(api);
+
+        streaming.streamChat(new JsonObject(), new StreamingGateway.StreamCallback() {
+            @Override public void onEvent(String event, JsonElement data) { }
+            @Override public void onError(ApiFailure error) {
+                failure.set(error);
+                latch.countDown();
+            }
+        });
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertNotNull(failure.get());
+        assertEquals("incomplete_stream", failure.get().getCode());
+    }
+
+    @Test
     public void fastApiValidationErrorDoesNotEchoSensitiveInput() throws Exception {
         server.enqueue(new MockResponse().setResponseCode(422).setHeader("Content-Type", "application/json").setBody(
             "{\"detail\":[{\"loc\":[\"body\",\"password\"],\"msg\":\"String too short\",\"input\":\"plain-secret-password\"}]}"
@@ -217,6 +240,177 @@ public class NativeGatewaysTest {
         assertFalse(details.toString().contains("hidden"));
     }
 
+    @Test
+    public void ordinaryUnauthorizedResponseDoesNotEraseRefreshableSession() throws Exception {
+        store.save(new SessionSecrets("expired-access", "still-valid-refresh", "Bearer"),
+            new UserProfile("u1", "群众", Role.CITIZEN, ApplicantType.INDIVIDUAL));
+        server.enqueue(new MockResponse().setResponseCode(401).setHeader("Content-Type", "application/json")
+            .setBody("{\"error\":{\"code\":\"invalid_access_token\"}}"));
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<ApiFailure> failure = new AtomicReference<>();
+
+        api.execute(NativeApiClient.Action.GET, new String[]{"applications"},
+            java.util.Collections.emptyMap(), null, true, false,
+            callback(latch, new AtomicReference<>(), failure));
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertNotNull(failure.get());
+        assertEquals(401, failure.get().getStatusCode());
+        assertTrue(store.load().isAuthenticated());
+        assertEquals("still-valid-refresh", store.load().getSecrets().getRefreshToken());
+    }
+
+    @Test
+    public void materialGenerationAndStatusUseFixedTypedPaths() throws Exception {
+        store.save(new SessionSecrets("access", "refresh", "Bearer"),
+            new UserProfile("u1", "群众", Role.CITIZEN, ApplicantType.INDIVIDUAL));
+        server.enqueue(new MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+            .setBody("{\"items\":[]}"));
+        server.enqueue(new MockResponse().setResponseCode(202).setHeader("Content-Type", "application/json")
+            .setBody("{\"generation_id\":\"generation-1\",\"status\":\"QUEUED\"}"));
+        server.enqueue(new MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+            .setBody("{\"generation_id\":\"generation-1\",\"status\":\"RUNNING\"}"));
+        CountDownLatch latch = new CountDownLatch(3);
+        OkHttpApplicationGateway applications = new OkHttpApplicationGateway(api, null);
+        applications.execute(Command.MATERIAL_TEMPLATE_OPTIONS_GET,
+            payload("application_id", "application-1"), counting(latch));
+        JsonObject generate = new JsonObject();
+        generate.addProperty("application_id", "application-1");
+        generate.addProperty("requirement_code", "id-2");
+        generate.addProperty("template_id", "template-1");
+        generate.addProperty("request_text", "请预填联系人");
+        applications.execute(Command.MATERIAL_TEMPLATE_GENERATE, generate, counting(latch));
+        applications.execute(Command.MATERIAL_TEMPLATE_STATUS_GET,
+            payload("generation_id", "generation-1"), counting(latch));
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        RecordedRequest first = server.takeRequest(1, TimeUnit.SECONDS);
+        RecordedRequest second = server.takeRequest(1, TimeUnit.SECONDS);
+        RecordedRequest third = server.takeRequest(1, TimeUnit.SECONDS);
+        assertNotNull(first);
+        assertNotNull(second);
+        assertNotNull(third);
+        Map<String, RecordedRequest> requests = new LinkedHashMap<>();
+        requests.put(first.getPath(), first);
+        requests.put(second.getPath(), second);
+        requests.put(third.getPath(), third);
+        RecordedRequest options = requests.get("/api/v1/applications/application-1/material-template-options");
+        RecordedRequest post = requests.get("/api/v1/applications/application-1/material-documents");
+        RecordedRequest status = requests.get("/api/v1/material-documents/generation-1");
+        assertNotNull(options);
+        assertNotNull(post);
+        assertNotNull(status);
+        assertEquals("GET", options.getMethod());
+        assertEquals("Bearer access", options.getHeader("Authorization"));
+        assertEquals("POST", post.getMethod());
+        assertNotNull(post.getHeader("Idempotency-Key"));
+        String body = post.getBody().readUtf8();
+        assertFalse(body.contains("application_id"));
+        assertTrue(body.contains("\"requirement_code\":\"id-2\""));
+        assertTrue(body.contains("\"template_id\":\"template-1\""));
+        assertEquals("GET", status.getMethod());
+        assertEquals("Bearer access", status.getHeader("Authorization"));
+    }
+
+    @Test
+    public void consultationMessagesAndMaterialConfirmationUseFixedPaths() throws Exception {
+        store.save(new SessionSecrets("access", "refresh", "Bearer"),
+            new UserProfile("u1", "群众", Role.CITIZEN, ApplicantType.INDIVIDUAL));
+        server.enqueue(new MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+            .setBody("{\"items\":[]}"));
+        server.enqueue(new MockResponse().setResponseCode(202).setHeader("Content-Type", "application/json")
+            .setBody("{\"generation_id\":\"generation-1\",\"status\":\"QUEUED\"}"));
+        CountDownLatch latch = new CountDownLatch(2);
+        OkHttpStreamingGateway consultations = new OkHttpStreamingGateway(api);
+        JsonObject messages = new JsonObject();
+        messages.addProperty("session_id", "session-1");
+        messages.addProperty("limit", "50");
+        consultations.executeConsultation(Command.CONSULTATION_MESSAGES, messages, counting(latch));
+        JsonObject confirm = new JsonObject();
+        confirm.addProperty("session_id", "session-1");
+        confirm.addProperty("intent_id", "intent-1");
+        consultations.executeConsultation(Command.CONSULTATION_MATERIAL_CONFIRM, confirm, counting(latch));
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        RecordedRequest first = server.takeRequest(1, TimeUnit.SECONDS);
+        RecordedRequest second = server.takeRequest(1, TimeUnit.SECONDS);
+        assertNotNull(first);
+        assertNotNull(second);
+        Map<String, RecordedRequest> requests = new LinkedHashMap<>();
+        requests.put(first.getPath(), first);
+        requests.put(second.getPath(), second);
+        RecordedRequest history = requests.get("/api/v1/consultations/session-1/messages?limit=50");
+        RecordedRequest create = requests.get(
+            "/api/v1/consultations/session-1/material-intents/intent-1/confirm"
+        );
+        assertNotNull(history);
+        assertEquals("GET", history.getMethod());
+        assertEquals("Bearer access", history.getHeader("Authorization"));
+        assertNotNull(create);
+        assertEquals("POST", create.getMethod());
+        assertEquals(0L, create.getBodySize());
+        assertNotNull(create.getHeader("Idempotency-Key"));
+        assertEquals("Bearer access", create.getHeader("Authorization"));
+    }
+
+    @Test
+    public void restoreRefreshesExpiredAccessTokenBeforeReturningProfile() throws Exception {
+        store.save(new SessionSecrets("expired-access", "refresh-one", "Bearer"),
+            new UserProfile("u1", "群众", Role.CITIZEN, ApplicantType.INDIVIDUAL));
+        server.enqueue(new MockResponse().setResponseCode(401).setHeader("Content-Type", "application/json")
+            .setBody("{\"error\":{\"code\":\"invalid_access_token\"}}"));
+        server.enqueue(new MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+            .setBody("{\"access_token\":\"fresh-access\",\"refresh_token\":\"refresh-two\",\"token_type\":\"Bearer\"}"));
+        server.enqueue(new MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"u1\",\"display_name\":\"群众\",\"role\":\"CITIZEN\",\"applicant_type\":\"INDIVIDUAL\"}"));
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<UserProfile> profile = new AtomicReference<>();
+
+        new OkHttpAuthGateway(api).restore(new GatewayCallback<UserProfile>() {
+            @Override public void onSuccess(UserProfile value) { profile.set(value); latch.countDown(); }
+            @Override public void onError(ApiFailure error) { latch.countDown(); }
+        });
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertNotNull(profile.get());
+        assertEquals(Role.CITIZEN, profile.get().getRole());
+        assertEquals("fresh-access", store.load().getSecrets().getAccessToken());
+        assertEquals("refresh-two", store.load().getSecrets().getRefreshToken());
+    }
+
+    @Test
+    public void restoreUsesSessionRotatedByRefreshOwnerWithoutSecondRefreshRequest() throws Exception {
+        CoordinatedMemoryStore coordinated = new CoordinatedMemoryStore();
+        coordinated.save(new SessionSecrets("expired-access", "refresh-one", "Bearer"),
+            new UserProfile("u1", "群众", Role.CITIZEN, ApplicantType.INDIVIDUAL));
+        coordinated.rotateWhenRefreshIsAcquired = true;
+        NativeApiClient coordinatedApi = new NativeApiClient(
+            new OkHttpClient(), server.url("/").toString(), coordinated
+        );
+        server.enqueue(new MockResponse().setResponseCode(401).setHeader("Content-Type", "application/json")
+            .setBody("{\"error\":{\"code\":\"invalid_access_token\"}}"));
+        server.enqueue(new MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"u1\",\"display_name\":\"群众\",\"role\":\"CITIZEN\",\"applicant_type\":\"INDIVIDUAL\"}"));
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<UserProfile> profile = new AtomicReference<>();
+
+        new OkHttpAuthGateway(coordinatedApi).restore(new GatewayCallback<UserProfile>() {
+            @Override public void onSuccess(UserProfile value) { profile.set(value); latch.countDown(); }
+            @Override public void onError(ApiFailure error) { latch.countDown(); }
+        });
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertNotNull(profile.get());
+        assertEquals("fresh-access", coordinated.load().getSecrets().getAccessToken());
+        RecordedRequest first = server.takeRequest(1, TimeUnit.SECONDS);
+        RecordedRequest second = server.takeRequest(1, TimeUnit.SECONDS);
+        assertNotNull(first);
+        assertNotNull(second);
+        assertEquals("/api/v1/auth/me", first.getPath());
+        assertEquals("/api/v1/auth/me", second.getPath());
+        assertNull(server.takeRequest(150, TimeUnit.MILLISECONDS));
+    }
+
     private static JsonObject payload(String key, String value) {
         JsonObject payload = new JsonObject();
         payload.addProperty(key, value);
@@ -246,5 +440,43 @@ public class NativeGatewaysTest {
         @Override public synchronized Snapshot load() { return snapshot; }
         @Override public synchronized void save(SessionSecrets secrets, UserProfile profile) { snapshot = new Snapshot(secrets, profile); }
         @Override public synchronized void clear() { snapshot = Snapshot.empty(); }
+    }
+
+    static final class CoordinatedMemoryStore implements CoordinatedSecureSessionStore {
+        private Snapshot snapshot = Snapshot.empty();
+        private boolean rotateWhenRefreshIsAcquired;
+
+        @Override public synchronized Snapshot load() { return snapshot; }
+        @Override public synchronized void save(SessionSecrets secrets, UserProfile profile) {
+            snapshot = new Snapshot(secrets, profile);
+        }
+        @Override public synchronized void clear() { snapshot = Snapshot.empty(); }
+
+        @Override
+        public synchronized RefreshLease acquireRefresh(Snapshot expected) {
+            if (rotateWhenRefreshIsAcquired) {
+                rotateWhenRefreshIsAcquired = false;
+                snapshot = new Snapshot(
+                    new SessionSecrets("fresh-access", "refresh-two", "Bearer"),
+                    expected.getProfile()
+                );
+                return new RefreshLease(false, snapshot, null);
+            }
+            return new RefreshLease(true, snapshot, new Object());
+        }
+
+        @Override
+        public synchronized Snapshot completeRefresh(
+            RefreshLease lease, SessionSecrets secrets, UserProfile profile
+        ) {
+            save(secrets, profile);
+            return snapshot;
+        }
+
+        @Override
+        public synchronized Snapshot failRefresh(RefreshLease lease, boolean invalidateCurrent) {
+            if (invalidateCurrent) clear();
+            return snapshot;
+        }
     }
 }

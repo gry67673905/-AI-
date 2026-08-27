@@ -56,7 +56,6 @@ public final class OkHttpStreamingGateway implements StreamingGateway {
                         return;
                     }
                     if (!response.isSuccessful()) {
-                        if (response.code() == 401) api.getSessionStore().clear();
                         callback.onError(NativeApiClient.parseFailure(response.code(), body.string()));
                         return;
                     }
@@ -65,7 +64,11 @@ public final class OkHttpStreamingGateway implements StreamingGateway {
                         emitJsonFallback(body.string(), callback);
                         return;
                     }
-                    parseSse(body.source(), callback);
+                    if (!parseSse(body.source(), callback)) {
+                        callback.onError(new ApiFailure(
+                            502, "incomplete_stream", "流式回答在完成前中断"
+                        ));
+                    }
                 } catch (IOException error) {
                     callback.onError(new ApiFailure(0, "stream_read_error", "读取流式回答失败"));
                 }
@@ -78,7 +81,16 @@ public final class OkHttpStreamingGateway implements StreamingGateway {
         switch (command) {
             case CONSULTATION_HISTORY:
                 api.execute(NativeApiClient.Action.GET, new String[]{"consultations"},
-                    GatewayPayload.query(payload, "page"), null, true, false, callback); return;
+                    GatewayPayload.query(payload, "cursor", "limit"), null, true, false, callback); return;
+            case CONSULTATION_MESSAGES:
+                api.execute(NativeApiClient.Action.GET,
+                    new String[]{"consultations", GatewayPayload.string(payload, "session_id"), "messages"},
+                    GatewayPayload.query(payload, "before", "limit"), null, true, false, callback); return;
+            case CONSULTATION_MATERIAL_CONFIRM:
+                api.execute(NativeApiClient.Action.POST,
+                    new String[]{"consultations", GatewayPayload.string(payload, "session_id"),
+                        "material-intents", GatewayPayload.string(payload, "intent_id"), "confirm"},
+                    Collections.emptyMap(), null, true, true, callback); return;
             case CONSULTATION_FEEDBACK:
                 api.execute(NativeApiClient.Action.POST, new String[]{"consultations", "feedback"},
                     Collections.emptyMap(), payload, true, true, callback); return;
@@ -102,13 +114,13 @@ public final class OkHttpStreamingGateway implements StreamingGateway {
         }
     }
 
-    static void parseSse(BufferedSource source, StreamCallback callback) throws IOException {
+    static boolean parseSse(BufferedSource source, StreamCallback callback) throws IOException {
         String event = "message";
         StringBuilder data = new StringBuilder();
         String line;
         while ((line = source.readUtf8Line()) != null) {
             if (line.isEmpty()) {
-                emit(event, data.toString(), callback);
+                if (emit(event, data.toString(), callback)) return true;
                 event = "message";
                 data.setLength(0);
                 continue;
@@ -121,19 +133,21 @@ public final class OkHttpStreamingGateway implements StreamingGateway {
                 data.append(line.substring(5).trim());
             }
         }
-        if (data.length() > 0) emit(event, data.toString(), callback);
+        return data.length() > 0 && emit(event, data.toString(), callback);
     }
 
-    private static void emit(String event, String rawData, StreamCallback callback) {
-        if (rawData == null || rawData.isEmpty()) return;
+    private static boolean emit(String event, String rawData, StreamCallback callback) {
+        if (rawData == null || rawData.isEmpty()) return false;
         if ("[DONE]".equals(rawData)) {
             callback.onEvent("done", new JsonObject());
-            return;
+            return true;
         }
         JsonElement data;
         try { data = JsonParser.parseString(rawData); }
         catch (RuntimeException ignored) { data = new JsonPrimitive(rawData); }
-        callback.onEvent(event == null || event.isEmpty() ? "message" : event, data);
+        String safeEvent = event == null || event.isEmpty() ? "message" : event;
+        callback.onEvent(safeEvent, data);
+        return "done".equals(safeEvent) || "error".equals(safeEvent);
     }
 
     private static void emitJsonFallback(String raw, StreamCallback callback) {

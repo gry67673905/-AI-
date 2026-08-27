@@ -15,14 +15,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.entities import Account, Application, MaterialRequirement
+from app.application.material_documents import LeasedMaterialDocumentJob
+from app.application.dtos import NavigationCatalogRowData
 from app.domain.enums import (
     ApplicantType,
     AppointmentStatus,
     ApplicationStatus,
     DeliveryStatus,
+    ConsultationMaterialIntentStatus,
     DigitalHumanIntentStatus,
     HandoffStatus,
     KnowledgeStatus,
+    MaterialDocumentScope,
+    MaterialDocumentStatus,
+    MaterialTemplateMode,
     PaymentStatus,
     Role,
     ServiceStatus,
@@ -43,8 +49,10 @@ from app.errors import (
     AuthenticationRequired,
     BusinessValidationError,
     ConflictError,
+    GoneError,
     PermissionDenied,
     ResourceNotFound,
+    TooManyRequests,
 )
 from app.infrastructure.catalog_seed import (
     DEMO_DEPARTMENTS,
@@ -59,6 +67,7 @@ from app.infrastructure.records import (
     ApplicationRecord,
     AppointmentRecord,
     BusinessAuditEventRecord,
+    ConsultationMaterialIntentRecord,
     ConsultationFeedbackRecord,
     DeliveryOrderRecord,
     DepartmentRecord,
@@ -72,6 +81,8 @@ from app.infrastructure.records import (
     KnowledgeChunkRecord,
     KnowledgeIndexJobRecord,
     MaterialRequirementRecord,
+    MaterialDocumentJobRecord,
+    MaterialTemplateRecord,
     PaymentOrderRecord,
     PolicySourceRecord,
     ProcessStepRecord,
@@ -79,6 +90,7 @@ from app.infrastructure.records import (
     ReviewTaskRecord,
     ServiceVersionRecord,
     ServiceWindowRecord,
+    ServiceWindowLinkRecord,
     StaffAssignmentRecord,
     VerificationSessionRecord,
 )
@@ -122,6 +134,196 @@ def application_view(record: ApplicationRecord) -> dict[str, Any]:
         "version": record.version,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
+        "demo_data": True,
+    }
+
+
+def _project_form_snapshot(
+    form_data: dict[str, Any], allowed_fields: list[str]
+) -> dict[str, Any]:
+    """Copy only allowlisted scalar demo values into the short-lived job."""
+
+    snapshot: dict[str, Any] = {}
+    for dotted in allowed_fields:
+        current: Any = form_data
+        for part in dotted.split("."):
+            if not isinstance(current, dict) or part not in current:
+                current = None
+                break
+            current = current[part]
+        bounded = _bounded_form_value(current)
+        if bounded is None:
+            continue
+        target = snapshot
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            child = target.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                target[part] = child
+            target = child
+        target[parts[-1]] = bounded
+    return snapshot
+
+
+_MATERIAL_DOCUMENT_ACTIVE_STATUSES = (
+    MaterialDocumentStatus.QUEUED.value,
+    MaterialDocumentStatus.RUNNING.value,
+)
+
+
+async def _enforce_material_document_job_limits(
+    session: AsyncSession,
+    owner_account_id: UUID,
+    now: datetime,
+    *,
+    user_daily_limit: int,
+    user_active_limit: int,
+    global_daily_limit: int,
+    global_queue_limit: int,
+) -> None:
+    """Serialize admission so count checks and the following insert are atomic."""
+
+    await session.execute(
+        text(
+            "SELECT pg_advisory_xact_lock("
+            "hashtextextended(:name, 0))"
+        ),
+        {"name": "smart-gov:material-document-admission:v1"},
+    )
+    day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    daily_count = await session.scalar(
+        select(func.count(MaterialDocumentJobRecord.id)).where(
+            MaterialDocumentJobRecord.owner_account_id == owner_account_id,
+            MaterialDocumentJobRecord.created_at >= day_start,
+        )
+    )
+    if int(daily_count or 0) >= user_daily_limit:
+        raise TooManyRequests(
+            "今日材料模板生成额度已用完，请明日再试",
+            "material_document_daily_limit_exceeded",
+        )
+    global_daily_count = await session.scalar(
+        select(func.count(MaterialDocumentJobRecord.id)).where(
+            MaterialDocumentJobRecord.created_at >= day_start,
+        )
+    )
+    if int(global_daily_count or 0) >= global_daily_limit:
+        raise TooManyRequests(
+            "今日材料模板生成总额度已用完，请明日再试",
+            "material_document_global_daily_limit_exceeded",
+        )
+    user_active_count = await session.scalar(
+        select(func.count(MaterialDocumentJobRecord.id)).where(
+            MaterialDocumentJobRecord.owner_account_id == owner_account_id,
+            MaterialDocumentJobRecord.status.in_(_MATERIAL_DOCUMENT_ACTIVE_STATUSES),
+            MaterialDocumentJobRecord.expires_at > now,
+        )
+    )
+    if int(user_active_count or 0) >= user_active_limit:
+        raise TooManyRequests(
+            "已有材料模板正在生成，请完成后再试",
+            "material_document_user_active_limit_exceeded",
+        )
+    global_active_count = await session.scalar(
+        select(func.count(MaterialDocumentJobRecord.id)).where(
+            MaterialDocumentJobRecord.status.in_(_MATERIAL_DOCUMENT_ACTIVE_STATUSES),
+            MaterialDocumentJobRecord.expires_at > now,
+        )
+    )
+    if int(global_active_count or 0) >= global_queue_limit:
+        raise TooManyRequests(
+            "材料模板生成队列繁忙，请稍后再试",
+            "material_document_global_queue_limit_exceeded",
+        )
+
+
+async def _require_material_document_service_published(
+    session: AsyncSession, service_id: UUID
+) -> GovernmentServiceRecord:
+    """Lock and re-check publication in the job-admission transaction."""
+
+    service = await session.get(
+        GovernmentServiceRecord, service_id, with_for_update=True
+    )
+    if service is None or service.status != ServiceStatus.PUBLISHED.value:
+        raise ConflictError(
+            "事项已下架，当前不能生成材料",
+            "material_document_service_unavailable",
+        )
+    return service
+
+
+def _bounded_form_value(value: Any, depth: int = 0) -> Any:
+    if depth > 2:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value[:1000] if isinstance(value, str) else value
+    if isinstance(value, list) and len(value) <= 50:
+        result = [_bounded_form_value(item, depth + 1) for item in value]
+        return result if all(item is not None for item in result) else None
+    if isinstance(value, dict) and len(value) <= 16:
+        result = {
+            str(key)[:64]: _bounded_form_value(item, depth + 1)
+            for key, item in value.items()
+        }
+        return result if all(item is not None for item in result.values()) else None
+    return None
+
+
+def _material_document_view(
+    record: MaterialDocumentJobRecord, *, include_object: bool = False
+) -> dict[str, Any]:
+    scope = record.scope or MaterialDocumentScope.APPLICATION.value
+    result: dict[str, Any] = {
+        "generation_id": record.id,
+        "scope": scope,
+        "service_id": record.service_id,
+        "service_version_id": record.service_version_id,
+        "application_id": record.application_id,
+        "consultation_session_id": record.consultation_session_id,
+        "requirement_code": record.requirement_code,
+        "status": record.status,
+        "filename": record.filename,
+        "size_bytes": record.size_bytes,
+        "sha256": record.sha256,
+        "expires_at": record.expires_at,
+        "warnings": list(record.warnings or []),
+        "error_code": record.error_code,
+        "demo_data": True,
+    }
+    if include_object:
+        result["object_key"] = record.output_object_key
+    return result
+
+
+def _consultation_material_intent_view(
+    intent: ConsultationMaterialIntentRecord,
+    requirement: MaterialRequirementRecord,
+    template: MaterialTemplateRecord,
+    service_version: ServiceVersionRecord,
+    *,
+    generation_id: UUID | None = None,
+) -> dict[str, Any]:
+    return {
+        "intent_id": intent.id,
+        "session_id": intent.session_id,
+        "service_id": intent.service_id,
+        "service_version_id": intent.service_version_id,
+        "service_title": service_version.title,
+        "requirement_code": intent.requirement_code,
+        "requirement_name": requirement.name,
+        "template_id": intent.template_id,
+        "template_key": template.template_key,
+        "template_title": template.title,
+        "mode": template.mode,
+        "notice": template.notice,
+        "status": intent.status,
+        "expires_at": intent.expires_at,
+        "confirmed_at": intent.confirmed_at,
+        "generation_id": generation_id,
+        "requires_confirmation": intent.status
+        == ConsultationMaterialIntentStatus.PENDING.value,
         "demo_data": True,
     }
 
@@ -265,11 +467,18 @@ class BusinessRepository:
                     record = ServiceWindowRecord(
                         code=item["code"], department_id=departments[item["department"]].id,
                         name=item["name"], address=item["address"], latitude=item["latitude"],
-                        longitude=item["longitude"], opening_hours="工作日 09:00-17:00",
+                        longitude=item["longitude"], city_code="DEMO",
+                        coordinate_type="GCJ02", data_mode="DEMO",
+                        source_reference="demo://navigation-catalog",
+                        opening_hours="工作日 09:00-17:00",
                         capacity_per_slot=10, active=True,
                     )
                     session.add(record)
                     await session.flush()
+                elif record.data_mode == "DEMO":
+                    record.city_code = "DEMO"
+                    record.coordinate_type = "GCJ02"
+                    record.source_reference = "demo://navigation-catalog"
                 windows[item["code"]] = record
 
             admin = await session.scalar(select(AccountRecord).where(AccountRecord.username == admin_username.lower()))
@@ -309,16 +518,38 @@ class BusinessRepository:
                 service = await session.scalar(
                     select(GovernmentServiceRecord).where(GovernmentServiceRecord.code == item["code"])
                 )
-                if service is not None:
-                    continue
-                service = GovernmentServiceRecord(
-                    code=item["code"], external_item_id=item["external_item_id"],
-                    department_id=departments[item["department"]].id,
-                    window_id=windows[item["window"]].id,
-                    applicant_type=item["applicant_type"], status=ServiceStatus.PUBLISHED.value,
+                created_service = service is None
+                if service is None:
+                    service = GovernmentServiceRecord(
+                        code=item["code"], external_item_id=item["external_item_id"],
+                        department_id=departments[item["department"]].id,
+                        window_id=windows[item["window"]].id,
+                        applicant_type=item["applicant_type"], status=ServiceStatus.PUBLISHED.value,
+                    )
+                    session.add(service)
+                    await session.flush()
+                service.handling_mode = item["handling_mode"]
+                service.online_status = item["online_status"]
+                service.status_reason = item["status_reason"]
+                service.status_updated_at = datetime.now(timezone.utc)
+                link = await session.get(
+                    ServiceWindowLinkRecord,
+                    (service.id, windows[item["window"]].id),
                 )
-                session.add(service)
-                await session.flush()
+                if link is None:
+                    session.add(
+                        ServiceWindowLinkRecord(
+                            service_id=service.id,
+                            window_id=windows[item["window"]].id,
+                            priority=0,
+                            active=True,
+                        )
+                    )
+                else:
+                    link.priority = 0
+                    link.active = True
+                if not created_service and service.current_version_id is not None:
+                    continue
                 version = ServiceVersionRecord(
                     service_id=service.id, version=1, title=item["title"], summary=item["summary"],
                     form_schema=item.get("form_schema", {}), fee_cents=item.get("fee_cents", 0),
@@ -513,7 +744,24 @@ class BusinessRepository:
             materials = list((await session.scalars(select(MaterialRequirementRecord).where(MaterialRequirementRecord.service_version_id == version.id).order_by(MaterialRequirementRecord.order_index))).all())
             steps = list((await session.scalars(select(ProcessStepRecord).where(ProcessStepRecord.service_version_id == version.id).order_by(ProcessStepRecord.order_index))).all())
             sources = list((await session.scalars(select(PolicySourceRecord).where(PolicySourceRecord.service_version_id == version.id))).all())
-            windows = list((await session.scalars(select(ServiceWindowRecord).where(ServiceWindowRecord.id == service.window_id, ServiceWindowRecord.active.is_(True)))).all()) if service.window_id else []
+            window_rows = (
+                await session.execute(
+                    select(ServiceWindowLinkRecord, ServiceWindowRecord)
+                    .join(
+                        ServiceWindowRecord,
+                        ServiceWindowRecord.id == ServiceWindowLinkRecord.window_id,
+                    )
+                    .where(
+                        ServiceWindowLinkRecord.service_id == service.id,
+                        ServiceWindowLinkRecord.active.is_(True),
+                        ServiceWindowRecord.active.is_(True),
+                    )
+                    .order_by(
+                        ServiceWindowLinkRecord.priority,
+                        ServiceWindowRecord.code,
+                    )
+                )
+            ).all()
             return {
                 **self._service_summary(service, version),
                 "version": version.version,
@@ -523,9 +771,88 @@ class BusinessRepository:
                 "materials": [self._material_dict(item) for item in materials],
                 "process_steps": [{"order": item.order_index, "code": item.code, "title": item.title, "actor": item.actor, "description": item.description, "expected_duration": item.expected_duration} for item in steps],
                 "policy_sources": [{"title": item.title, "reference": item.reference} for item in sources],
-                "windows": [self._window_dict(item) for item in windows],
+                "windows": [
+                    self._navigation_window_dict(window, link.priority)
+                    for link, window in window_rows
+                ],
                 "notice": "全部事项、条件、窗口和政策来源均为本地演示数据。",
             }
+
+    async def get_navigation_options(self, service_id: UUID) -> dict[str, Any]:
+        """Return only authoritative, active catalog rows; never user location."""
+
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(GovernmentServiceRecord, ServiceVersionRecord)
+                    .join(
+                        ServiceVersionRecord,
+                        GovernmentServiceRecord.current_version_id
+                        == ServiceVersionRecord.id,
+                    )
+                    .where(
+                        GovernmentServiceRecord.id == service_id,
+                        GovernmentServiceRecord.status
+                        == ServiceStatus.PUBLISHED.value,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise ResourceNotFound("事项")
+            service, version = row
+            window_rows = (
+                await session.execute(
+                    select(ServiceWindowLinkRecord, ServiceWindowRecord)
+                    .join(
+                        ServiceWindowRecord,
+                        ServiceWindowRecord.id == ServiceWindowLinkRecord.window_id,
+                    )
+                    .where(
+                        ServiceWindowLinkRecord.service_id == service.id,
+                        ServiceWindowLinkRecord.active.is_(True),
+                        ServiceWindowRecord.active.is_(True),
+                    )
+                    .order_by(
+                        ServiceWindowLinkRecord.priority,
+                        ServiceWindowRecord.code,
+                    )
+                )
+            ).all()
+            windows = [
+                self._navigation_window_dict(window, link.priority)
+                for link, window in window_rows
+            ]
+            demo_only, notice = self._navigation_catalog_notice(windows)
+            return {
+                "service": {
+                    "id": service.id,
+                    "code": service.code,
+                    "name": version.title,
+                    "handling_mode": service.handling_mode,
+                    "online_status": service.online_status,
+                    "status_reason": service.status_reason,
+                    "status_updated_at": service.status_updated_at,
+                },
+                "windows": windows,
+                "active_location_count": len(windows),
+                "demo_only": demo_only,
+                "notice": notice,
+            }
+
+    @staticmethod
+    def _navigation_catalog_notice(
+        windows: list[dict[str, Any]],
+    ) -> tuple[bool, str]:
+        """Keep the demo warning until every returned location is verified."""
+
+        if not windows:
+            return False, "当前没有已启用的线下网点。"
+        has_demo = any(item.get("data_mode") != "VERIFIED" for item in windows)
+        if has_demo:
+            if all(item.get("data_mode") == "DEMO" for item in windows):
+                return True, "当前均为演示网点，不可用于真实导航。"
+            return True, "当前结果包含演示网点；演示网点不可用于真实导航。"
+        return False, "网点来自管理员核验目录；出发前请再次确认开放时间。"
 
     async def get_material_entities(self, service_id: UUID) -> tuple[dict[str, Any], list[MaterialRequirement]]:
         bundle = await self.get_service_bundle(service_id)
@@ -577,8 +904,18 @@ class BusinessRepository:
                     code=values["code"], department_id=values["department_id"],
                     window_id=values.get("window_id"),
                     applicant_type=values["applicant_type"], status=ServiceStatus.DRAFT.value,
+                    handling_mode="UNKNOWN", online_status="UNKNOWN",
                 )
                 session.add(service); await session.flush()
+                if values.get("window_id"):
+                    session.add(
+                        ServiceWindowLinkRecord(
+                            service_id=service.id,
+                            window_id=values["window_id"],
+                            priority=0,
+                            active=True,
+                        )
+                    )
                 version = await self._insert_version(session, service.id, 1, values)
                 service.current_version_id = version.id
                 await self._audit(session, actor_id, "service.created", "service", service.id, {"version": 1})
@@ -1042,7 +1379,13 @@ class BusinessRepository:
 
     async def list_consultations(self, account_id: UUID) -> list[dict[str, Any]]:
         async with self.sessions() as session:
-            sessions = (await session.scalars(select(ChatSession).where(ChatSession.owner_account_id == account_id).order_by(ChatSession.updated_at.desc()))).all()
+            sessions = (
+                await session.scalars(
+                    select(ChatSession)
+                    .where(ChatSession.owner_account_id == account_id)
+                    .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+                )
+            ).all()
             result = []
             for chat in sessions:
                 count = await session.scalar(select(func.count()).select_from(ChatMessage).where(ChatMessage.session_id == chat.id))
@@ -1611,6 +1954,223 @@ class BusinessRepository:
                 statement = statement.where(ServiceWindowRecord.department_id == department_id)
             return [self._window_dict(item) for item in (await session.scalars(statement)).all()]
 
+    async def import_navigation_catalog(
+        self,
+        actor_id: UUID,
+        rows: tuple[NavigationCatalogRowData, ...],
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        """Atomically replace links for services represented by the CSV snapshot."""
+
+        service_codes = {row.service_code for row in rows}
+        window_codes = {row.window_code for row in rows}
+        try:
+            async with self.sessions() as session:
+                async with session.begin():
+                    services = {
+                        item.code: item
+                        for item in (
+                            await session.scalars(
+                                select(GovernmentServiceRecord).where(
+                                    GovernmentServiceRecord.code.in_(service_codes)
+                                ).with_for_update()
+                            )
+                        ).all()
+                    }
+                    existing_windows = {
+                        item.code: item
+                        for item in (
+                            await session.scalars(
+                                select(ServiceWindowRecord).where(
+                                    ServiceWindowRecord.code.in_(window_codes)
+                                ).with_for_update()
+                            )
+                        ).all()
+                    }
+                    errors: list[dict[str, Any]] = []
+                    window_departments: dict[str, UUID] = {}
+                    for row in rows:
+                        service = services.get(row.service_code)
+                        if service is None:
+                            errors.append(
+                                {
+                                    "line": row.line_number,
+                                    "field": "service_code",
+                                    "message": "事项编码不存在",
+                                }
+                            )
+                            continue
+                        expected_department = window_departments.setdefault(
+                            row.window_code, service.department_id
+                        )
+                        if expected_department != service.department_id:
+                            errors.append(
+                                {
+                                    "line": row.line_number,
+                                    "field": "window_code",
+                                    "message": "同一网点不能跨部门关联",
+                                }
+                            )
+                        existing = existing_windows.get(row.window_code)
+                        if (
+                            existing is not None
+                            and existing.department_id != service.department_id
+                        ):
+                            errors.append(
+                                {
+                                    "line": row.line_number,
+                                    "field": "window_code",
+                                    "message": "网点已属于其他部门",
+                                }
+                            )
+                    report = {
+                        "valid": not errors,
+                        "dry_run": dry_run,
+                        "rows": len(rows),
+                        "services": len(service_codes),
+                        "windows": len(window_codes),
+                        "links": len(rows),
+                        "written": False,
+                        "errors": errors[:100],
+                    }
+                    if errors or dry_run:
+                        return report
+
+                    # A CSV import is a full snapshot for every service named
+                    # in the file.  Load the pre-existing associations inside
+                    # this same transaction so rows omitted from the snapshot
+                    # can be disabled atomically without disabling a window
+                    # that another service may still use.
+                    existing_link_rows = list(
+                        (
+                            await session.scalars(
+                                select(ServiceWindowLinkRecord).where(
+                                    ServiceWindowLinkRecord.service_id.in_(
+                                        {service.id for service in services.values()}
+                                    )
+                                )
+                            )
+                        ).all()
+                    )
+
+                    imported_at = datetime.now(timezone.utc)
+                    service_rows: dict[str, NavigationCatalogRowData] = {}
+                    window_rows: dict[str, NavigationCatalogRowData] = {}
+                    for row in rows:
+                        service_rows.setdefault(row.service_code, row)
+                        window_rows.setdefault(row.window_code, row)
+
+                    for code, row in service_rows.items():
+                        service = services[code]
+                        service.handling_mode = row.handling_mode
+                        service.online_status = row.online_status
+                        service.status_reason = (
+                            "导航目录导入：仅线下办理"
+                            if row.handling_mode == "OFFLINE_ONLY"
+                            else (
+                                "导航目录导入：线上渠道暂不可用"
+                                if row.online_status == "TEMP_UNAVAILABLE"
+                                else "导航目录导入"
+                            )
+                        )
+                        service.status_updated_at = row.verified_at or imported_at
+
+                    for code, row in window_rows.items():
+                        window = existing_windows.get(code)
+                        if window is None:
+                            window = ServiceWindowRecord(
+                                department_id=window_departments[code],
+                                code=code,
+                                capacity_per_slot=10,
+                                active=True,
+                            )
+                            session.add(window)
+                            existing_windows[code] = window
+                        window.name = row.name
+                        window.address = row.address
+                        window.city_code = row.city_code
+                        window.longitude = row.longitude
+                        window.latitude = row.latitude
+                        window.coordinate_type = row.coordinate_type
+                        window.opening_hours = row.opening_hours
+                        window.data_mode = row.data_mode
+                        window.source_reference = row.source_reference
+                        window.verified_at = row.verified_at
+                        window.active = True
+                    await session.flush()
+
+                    snapshot_link_keys: set[tuple[UUID, UUID]] = set()
+                    for row in rows:
+                        service = services[row.service_code]
+                        window = existing_windows[row.window_code]
+                        snapshot_link_keys.add((service.id, window.id))
+                        link = await session.get(
+                            ServiceWindowLinkRecord, (service.id, window.id)
+                        )
+                        if link is None:
+                            link = ServiceWindowLinkRecord(
+                                service_id=service.id,
+                                window_id=window.id,
+                            )
+                            session.add(link)
+                        link.priority = row.priority
+                        link.active = True
+
+                    deactivated_links = 0
+                    for link in existing_link_rows:
+                        if (link.service_id, link.window_id) not in snapshot_link_keys:
+                            if link.active:
+                                deactivated_links += 1
+                            link.active = False
+
+                    # Keep the legacy single-window field useful during the
+                    # compatibility release.  It follows the active snapshot's
+                    # highest-priority row (stable code tie-break), never an
+                    # association that was just disabled.
+                    snapshot_rows_by_service: dict[
+                        str, list[NavigationCatalogRowData]
+                    ] = {}
+                    for row in rows:
+                        snapshot_rows_by_service.setdefault(
+                            row.service_code, []
+                        ).append(row)
+                    for code, service in services.items():
+                        candidates = snapshot_rows_by_service.get(code, [])
+                        if not candidates:
+                            service.window_id = None
+                            continue
+                        primary = min(
+                            candidates,
+                            key=lambda item: (
+                                item.priority,
+                                item.window_code,
+                                item.line_number,
+                            ),
+                        )
+                        service.window_id = existing_windows[primary.window_code].id
+
+                    await self._audit(
+                        session,
+                        actor_id,
+                        "navigation_catalog.imported",
+                        "navigation_catalog",
+                        "csv",
+                        {
+                            "rows": len(rows),
+                            "services": len(service_codes),
+                            "windows": len(window_codes),
+                            "links": len(rows),
+                            "deactivated_links": deactivated_links,
+                        },
+                    )
+                    report["written"] = True
+                    return report
+        except IntegrityError as exc:
+            raise ConflictError(
+                "导航目录在导入期间发生并发冲突，请重新执行dry-run",
+                "navigation_catalog_conflict",
+            ) from exc
+
     async def create_digital_human_intent(
         self,
         owner_account_id: UUID | None,
@@ -1662,11 +2222,12 @@ class BusinessRepository:
     async def consume_digital_human_intent(
         self,
         intent_id: UUID,
-        actor_id: UUID,
-        actor_role: Role,
+        actor_id: UUID | None,
+        actor_role: Role | None,
         client_session_id: UUID,
         client_chat_id_hash: str,
         now: datetime,
+        required_intent_type: str | None = None,
     ) -> dict[str, Any]:
         async with self._transaction() as session:
             record = await session.scalar(
@@ -1677,11 +2238,34 @@ class BusinessRepository:
             if (
                 record is None
                 or record.owner_account_id != actor_id
-                or record.owner_role != actor_role.value
+                or record.owner_role != (
+                    actor_role.value if actor_role is not None else None
+                )
                 or record.client_session_id != client_session_id
             ):
                 # Deliberately conceal whether another account owns the intent.
                 raise ResourceNotFound("数字人操作意图")
+            if (
+                required_intent_type is not None
+                and record.intent_type != required_intent_type
+            ):
+                # This check is deliberately inside the row lock and before
+                # consumption: an anonymous caller must not burn a protected
+                # workbench intent merely to discover that login is required.
+                raise AuthenticationRequired("请先登录后继续")
+            if record.intent_type == "OPEN_SERVICE_NAVIGATION":
+                prefill = record.prefill_json
+                try:
+                    service_id_value = prefill["service_id"]
+                    UUID(str(service_id_value))
+                except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                    raise ResourceNotFound("数字人操作意图") from exc
+                if (
+                    record.section != "services"
+                    or not isinstance(prefill, dict)
+                    or set(prefill) != {"service_id"}
+                ):
+                    raise ResourceNotFound("数字人操作意图")
             if record.status != DigitalHumanIntentStatus.ACTIVE.value:
                 raise ConflictError(
                     "数字人操作意图已使用",
@@ -2008,6 +2592,1048 @@ class BusinessRepository:
                 "_chunk_ids": chunk_ids,
             }
 
+    async def seed_material_templates(self, templates: tuple[Any, ...]) -> None:
+        async with self._transaction() as session:
+            await session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtextextended(:name, 0))"
+                ),
+                {"name": "smart-gov:material-template-seed:v1"},
+            )
+            resolved: list[tuple[Any, MaterialTemplateRecord | None, dict[str, Any]]] = []
+            for item in templates:
+                service = await session.scalar(
+                    select(GovernmentServiceRecord).where(
+                        GovernmentServiceRecord.code == item.service_code
+                    )
+                )
+                if service is None or service.current_version_id is None:
+                    raise RuntimeError(
+                        "material_template_service_missing:"
+                        f"{item.service_code}:{item.template_key}"
+                    )
+                requirement = await session.scalar(
+                    select(MaterialRequirementRecord).where(
+                        MaterialRequirementRecord.service_version_id
+                        == service.current_version_id,
+                        MaterialRequirementRecord.code == item.requirement_code,
+                    )
+                )
+                if requirement is None:
+                    raise RuntimeError(
+                        "material_template_requirement_missing:"
+                        f"{item.service_code}:{item.requirement_code}:"
+                        f"{item.template_key}"
+                    )
+                record = await session.scalar(
+                    select(MaterialTemplateRecord).where(
+                        MaterialTemplateRecord.template_key == item.template_key,
+                        MaterialTemplateRecord.material_requirement_id
+                        == requirement.id,
+                    )
+                )
+                values = {
+                    "material_requirement_id": requirement.id,
+                    "service_code": item.service_code,
+                    "requirement_code": item.requirement_code,
+                    "title": item.title,
+                    "mode": item.mode.value,
+                    "source_object_key": item.source_object_key,
+                    "source_sha256": item.source_sha256,
+                    "allowed_fields": list(item.allowed_fields),
+                    "notice": item.notice,
+                    "active": True,
+                }
+                immutable_keys = {
+                    "material_requirement_id",
+                    "service_code",
+                    "requirement_code",
+                    "title",
+                    "mode",
+                    "source_object_key",
+                    "source_sha256",
+                    "allowed_fields",
+                    "notice",
+                }
+                if record is not None and any(
+                    getattr(record, key) != value
+                    for key, value in values.items()
+                    if key in immutable_keys
+                ):
+                    raise RuntimeError(
+                        "material_template_immutable_conflict:"
+                        f"{item.service_code}:{item.requirement_code}:"
+                        f"{item.template_key}"
+                    )
+                resolved.append((item, record, values))
+
+            # This catalog has no administrative writer: every row is owned by
+            # this reviewed manifest. A key removed from the pack is therefore
+            # disabled across versions. Rows for keys that remain present are
+            # deliberately not bulk-reactivated: an old source recalled in a
+            # prior manifest must stay disabled if the key is later reused by a
+            # new service version. Only the resolved current row below may be
+            # activated.
+            manifest_keys = sorted({item.template_key for item in templates})
+            if manifest_keys:
+                await session.execute(
+                    update(MaterialTemplateRecord)
+                    .where(MaterialTemplateRecord.template_key.not_in(manifest_keys))
+                    .values(active=False)
+                )
+            else:
+                await session.execute(
+                    update(MaterialTemplateRecord).values(active=False)
+                )
+
+            for item, record, values in resolved:
+                if record is None:
+                    session.add(
+                        MaterialTemplateRecord(
+                            template_key=item.template_key, version=1, **values
+                        )
+                    )
+                else:
+                    # All catalog semantics are immutable for this requirement
+                    # and key; only reactivation after a manifest reintroduction
+                    # is permitted.
+                    record.active = True
+
+    async def list_material_template_options(
+        self, application_id: UUID, owner_account_id: UUID
+    ) -> list[dict[str, Any]]:
+        async with self.sessions() as session:
+            application = await session.get(ApplicationRecord, application_id)
+            if (
+                application is None
+                or application.applicant_id != owner_account_id
+            ):
+                raise ResourceNotFound("办件")
+            service = await session.get(
+                GovernmentServiceRecord, application.service_id
+            )
+            if (
+                service is None
+                or service.status != ServiceStatus.PUBLISHED.value
+            ):
+                raise ResourceNotFound("事项")
+            rows = (
+                await session.execute(
+                    select(MaterialRequirementRecord, MaterialTemplateRecord)
+                    .outerjoin(
+                        MaterialTemplateRecord,
+                        and_(
+                            MaterialTemplateRecord.material_requirement_id
+                            == MaterialRequirementRecord.id,
+                            MaterialTemplateRecord.active.is_(True),
+                        ),
+                    )
+                    .where(
+                        MaterialRequirementRecord.service_version_id
+                        == application.service_version_id
+                    )
+                    .order_by(
+                        MaterialRequirementRecord.order_index,
+                        MaterialTemplateRecord.template_key,
+                    )
+                )
+            ).all()
+            items: list[dict[str, Any]] = []
+            for requirement, template in rows:
+                mode = template.mode if template else MaterialTemplateMode.NOT_GENERATABLE.value
+                available = bool(
+                    template
+                    and template.active
+                    and mode != MaterialTemplateMode.NOT_GENERATABLE.value
+                    and template.source_object_key
+                    and template.source_sha256
+                )
+                items.append(
+                    {
+                        "requirement_code": requirement.code,
+                        "requirement_name": requirement.name,
+                        "template_available": available,
+                        "template_id": template.id if available else None,
+                        "template_title": template.title if template else None,
+                        "mode": mode,
+                        "notice": template.notice if template else "该材料不能由系统生成。",
+                        "demo_data": True,
+                    }
+                )
+            return items
+
+    async def list_consultation_material_template_options(
+        self, service_id: UUID | None = None, query: str | None = None
+    ) -> list[dict[str, Any]]:
+        if service_id is None:
+            return await self.search_consultation_material_template_options(query or "")
+        async with self.sessions() as session:
+            service = await session.get(GovernmentServiceRecord, service_id)
+            if (
+                service is None
+                or service.status != ServiceStatus.PUBLISHED.value
+                or service.current_version_id is None
+            ):
+                raise ResourceNotFound("事项")
+            service_version = await session.get(
+                ServiceVersionRecord, service.current_version_id
+            )
+            if (
+                service_version is None
+                or service_version.service_id != service.id
+                or not service_version.immutable
+            ):
+                raise ResourceNotFound("事项版本")
+            rows = (
+                await session.execute(
+                    select(MaterialRequirementRecord, MaterialTemplateRecord)
+                    .outerjoin(
+                        MaterialTemplateRecord,
+                        and_(
+                            MaterialTemplateRecord.material_requirement_id
+                            == MaterialRequirementRecord.id,
+                            MaterialTemplateRecord.active.is_(True),
+                        ),
+                    )
+                    .where(
+                        MaterialRequirementRecord.service_version_id
+                        == service.current_version_id
+                    )
+                    .order_by(
+                        MaterialRequirementRecord.order_index,
+                        MaterialTemplateRecord.template_key,
+                    )
+                )
+            ).all()
+            items: list[dict[str, Any]] = []
+            for requirement, template in rows:
+                mode = (
+                    template.mode
+                    if template
+                    else MaterialTemplateMode.NOT_GENERATABLE.value
+                )
+                available = bool(
+                    template
+                    and template.active
+                    and mode != MaterialTemplateMode.NOT_GENERATABLE.value
+                    and template.source_object_key
+                    and template.source_sha256
+                )
+                items.append(
+                    {
+                        "service_id": service.id,
+                        "service_version_id": service_version.id,
+                        "service_code": service.code,
+                        "service_title": service_version.title,
+                        "requirement_code": requirement.code,
+                        "requirement_name": requirement.name,
+                        "template_available": available,
+                        "template_id": template.id if available else None,
+                        "template_key": template.template_key if template else None,
+                        "template_title": template.title if template else None,
+                        "mode": mode,
+                        "notice": (
+                            template.notice
+                            if template
+                            else "该材料不能由系统生成。"
+                        ),
+                        "demo_data": True,
+                    }
+                )
+            normalized_query = (query or "").strip().casefold()[:100]
+            if normalized_query:
+                items = [
+                    item
+                    for item in items
+                    if normalized_query
+                    in str(item["requirement_name"]).casefold()
+                    or normalized_query
+                    in str(item.get("template_title") or "").casefold()
+                ]
+            return items
+
+    async def search_consultation_material_template_options(
+        self, query: str
+    ) -> list[dict[str, Any]]:
+        normalized_query = query.strip()[:100]
+        async with self.sessions() as session:
+            statement = (
+                select(
+                    GovernmentServiceRecord,
+                    ServiceVersionRecord,
+                    MaterialRequirementRecord,
+                    MaterialTemplateRecord,
+                )
+                .join(
+                    ServiceVersionRecord,
+                    and_(
+                        ServiceVersionRecord.id
+                        == GovernmentServiceRecord.current_version_id,
+                        ServiceVersionRecord.service_id == GovernmentServiceRecord.id,
+                    ),
+                )
+                .join(
+                    MaterialRequirementRecord,
+                    MaterialRequirementRecord.service_version_id
+                    == ServiceVersionRecord.id,
+                )
+                .join(
+                    MaterialTemplateRecord,
+                    MaterialTemplateRecord.material_requirement_id
+                    == MaterialRequirementRecord.id,
+                )
+                .where(
+                    GovernmentServiceRecord.status == ServiceStatus.PUBLISHED.value,
+                    ServiceVersionRecord.immutable.is_(True),
+                    MaterialTemplateRecord.active.is_(True),
+                    MaterialTemplateRecord.mode
+                    != MaterialTemplateMode.NOT_GENERATABLE.value,
+                    MaterialTemplateRecord.source_object_key.is_not(None),
+                    MaterialTemplateRecord.source_sha256.is_not(None),
+                )
+            )
+            if normalized_query:
+                statement = statement.where(
+                    or_(
+                        MaterialRequirementRecord.name.contains(
+                            normalized_query, autoescape=True
+                        ),
+                        MaterialTemplateRecord.title.contains(
+                            normalized_query, autoescape=True
+                        ),
+                    )
+                )
+            rows = (
+                await session.execute(
+                    statement.order_by(
+                        ServiceVersionRecord.title,
+                        MaterialRequirementRecord.order_index,
+                        MaterialTemplateRecord.template_key,
+                    )
+                )
+            ).all()
+            return [
+                {
+                    "service_id": service.id,
+                    "service_version_id": service_version.id,
+                    "service_code": service.code,
+                    "service_title": service_version.title,
+                    "requirement_code": requirement.code,
+                    "requirement_name": requirement.name,
+                    "template_available": True,
+                    "template_id": template.id,
+                    "template_key": template.template_key,
+                    "template_title": template.title,
+                    "mode": template.mode,
+                    "notice": template.notice,
+                    "demo_data": True,
+                }
+                for service, service_version, requirement, template in rows
+            ]
+
+    async def create_consultation_material_intent(
+        self,
+        owner_account_id: UUID,
+        session_id: UUID,
+        service_id: UUID,
+        requirement_code: str,
+        template_id: UUID,
+        request_text: str | None,
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        request_text = request_text.strip() if request_text else None
+        if request_text and len(request_text) > 300:
+            raise BusinessValidationError("材料生成要求不能超过 300 个字符")
+        if expires_at <= now:
+            raise BusinessValidationError("材料生成确认有效期必须晚于当前时间")
+        async with self._transaction() as session:
+            chat = await session.get(ChatSession, session_id, with_for_update=True)
+            if chat is None or chat.owner_account_id != owner_account_id:
+                raise ResourceNotFound("咨询会话")
+            service = await _require_material_document_service_published(
+                session, service_id
+            )
+            if service.current_version_id is None:
+                raise ConflictError(
+                    "事项缺少已发布版本",
+                    "material_document_service_version_unavailable",
+                )
+            service_version = await session.get(
+                ServiceVersionRecord, service.current_version_id
+            )
+            if (
+                service_version is None
+                or service_version.service_id != service.id
+                or not service_version.immutable
+            ):
+                raise ConflictError(
+                    "事项版本当前不可用于生成材料",
+                    "material_document_service_version_unavailable",
+                )
+            requirement = await session.scalar(
+                select(MaterialRequirementRecord).where(
+                    MaterialRequirementRecord.service_version_id
+                    == service.current_version_id,
+                    MaterialRequirementRecord.code == requirement_code,
+                )
+            )
+            template = await session.get(MaterialTemplateRecord, template_id)
+            if (
+                requirement is None
+                or template is None
+                or template.material_requirement_id != requirement.id
+                or not template.active
+                or template.mode == MaterialTemplateMode.NOT_GENERATABLE.value
+                or not template.source_object_key
+                or not template.source_sha256
+            ):
+                raise ResourceNotFound("可生成材料模板")
+            intent = ConsultationMaterialIntentRecord(
+                owner_account_id=owner_account_id,
+                session_id=session_id,
+                service_id=service.id,
+                service_version_id=service_version.id,
+                material_requirement_id=requirement.id,
+                template_id=template.id,
+                requirement_code=requirement.code,
+                status=ConsultationMaterialIntentStatus.PENDING.value,
+                expires_at=expires_at,
+            )
+            session.add(intent)
+            await session.flush()
+            await self._audit(
+                session,
+                owner_account_id,
+                "consultation_material.intent_created",
+                "consultation_material_intent",
+                intent.id,
+                {
+                    "session_id": str(session_id),
+                    "service_id": str(service.id),
+                    "requirement_code": requirement.code,
+                    "template_id": str(template.id),
+                },
+            )
+            return _consultation_material_intent_view(
+                intent, requirement, template, service_version
+            )
+
+    async def get_consultation_material_intent_states(
+        self,
+        owner_account_id: UUID,
+        session_id: UUID,
+        intent_ids: tuple[UUID, ...],
+        now: datetime,
+    ) -> dict[UUID, dict[str, Any]]:
+        if not intent_ids:
+            return {}
+        bounded_intent_ids = tuple(dict.fromkeys(intent_ids))[:100]
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        ConsultationMaterialIntentRecord,
+                        MaterialDocumentJobRecord,
+                    )
+                    .outerjoin(
+                        MaterialDocumentJobRecord,
+                        MaterialDocumentJobRecord.consultation_intent_id
+                        == ConsultationMaterialIntentRecord.id,
+                    )
+                    .where(
+                        ConsultationMaterialIntentRecord.owner_account_id
+                        == owner_account_id,
+                        ConsultationMaterialIntentRecord.session_id == session_id,
+                        ConsultationMaterialIntentRecord.id.in_(bounded_intent_ids),
+                    )
+                )
+            ).all()
+            result: dict[UUID, dict[str, Any]] = {}
+            for intent, job in rows:
+                intent_expires_at = intent.expires_at
+                if intent_expires_at.tzinfo is None:
+                    intent_expires_at = intent_expires_at.replace(tzinfo=timezone.utc)
+                intent_status = intent.status
+                if (
+                    intent_status == ConsultationMaterialIntentStatus.PENDING.value
+                    and intent_expires_at <= now
+                ):
+                    intent_status = "EXPIRED"
+                generation_status: str | None = None
+                generation_expires_at: datetime | None = None
+                if job is not None:
+                    generation_status = job.status
+                    generation_expires_at = job.expires_at
+                    comparable_expiry = generation_expires_at
+                    if comparable_expiry.tzinfo is None:
+                        comparable_expiry = comparable_expiry.replace(
+                            tzinfo=timezone.utc
+                        )
+                    if comparable_expiry <= now:
+                        generation_status = MaterialDocumentStatus.EXPIRED.value
+                result[intent.id] = {
+                    "intent_id": intent.id,
+                    "intent_status": intent_status,
+                    "intent_expires_at": intent.expires_at,
+                    "generation_id": job.id if job is not None else None,
+                    "generation_status": generation_status,
+                    "generation_expires_at": generation_expires_at,
+                }
+            return result
+
+    async def get_latest_pending_consultation_material_intent(
+        self, owner_account_id: UUID, session_id: UUID, now: datetime
+    ) -> dict[str, Any] | None:
+        async with self.sessions() as session:
+            candidates = list(
+                (
+                    await session.scalars(
+                        select(ConsultationMaterialIntentRecord)
+                        .where(
+                            ConsultationMaterialIntentRecord.owner_account_id
+                            == owner_account_id,
+                            ConsultationMaterialIntentRecord.session_id == session_id,
+                            ConsultationMaterialIntentRecord.status
+                            == ConsultationMaterialIntentStatus.PENDING.value,
+                            ConsultationMaterialIntentRecord.expires_at > now,
+                        )
+                        .order_by(ConsultationMaterialIntentRecord.created_at.desc())
+                        .limit(2)
+                    )
+                ).all()
+            )
+            # A follow-up such as “那就生成吧” is safe only when the server can
+            # resolve exactly one still-valid candidate. Never default to the
+            # most recent row when the conversation contains alternatives.
+            if len(candidates) != 1:
+                return None
+            intent = candidates[0]
+            service = await session.get(GovernmentServiceRecord, intent.service_id)
+            requirement = await session.get(
+                MaterialRequirementRecord, intent.material_requirement_id
+            )
+            template = await session.get(MaterialTemplateRecord, intent.template_id)
+            service_version = await session.get(
+                ServiceVersionRecord, intent.service_version_id
+            )
+            if (
+                service is None
+                or service.status != ServiceStatus.PUBLISHED.value
+                or service.current_version_id != intent.service_version_id
+                or requirement is None
+                or requirement.service_version_id != intent.service_version_id
+                or requirement.code != intent.requirement_code
+                or template is None
+                or template.material_requirement_id != requirement.id
+                or not template.active
+                or template.mode == MaterialTemplateMode.NOT_GENERATABLE.value
+                or not template.source_object_key
+                or not template.source_sha256
+                or service_version is None
+                or service_version.service_id != service.id
+                or not service_version.immutable
+            ):
+                return None
+            return _consultation_material_intent_view(
+                intent, requirement, template, service_version
+            )
+
+    async def confirm_consultation_material_intent(
+        self,
+        owner_account_id: UUID,
+        session_id: UUID,
+        intent_id: UUID,
+        job_expires_at: datetime,
+        model_name: str,
+        release_lane: str,
+        user_daily_limit: int,
+        user_active_limit: int,
+        global_daily_limit: int,
+        global_queue_limit: int,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        async with self._transaction() as session:
+            intent = await session.get(
+                ConsultationMaterialIntentRecord, intent_id, with_for_update=True
+            )
+            if (
+                intent is None
+                or intent.owner_account_id != owner_account_id
+                or intent.session_id != session_id
+            ):
+                # Conceal whether another account/session owns this intent.
+                raise ResourceNotFound("材料生成确认")
+            requirement = await session.get(
+                MaterialRequirementRecord, intent.material_requirement_id
+            )
+            template = await session.get(MaterialTemplateRecord, intent.template_id)
+            service_version = await session.get(
+                ServiceVersionRecord, intent.service_version_id
+            )
+            if requirement is None or template is None or service_version is None:
+                raise ResourceNotFound("材料生成确认")
+            if intent.status == ConsultationMaterialIntentStatus.CONFIRMED.value:
+                existing = await session.scalar(
+                    select(MaterialDocumentJobRecord).where(
+                        MaterialDocumentJobRecord.consultation_intent_id == intent.id
+                    )
+                )
+                if existing is None:
+                    raise ConflictError(
+                        "材料生成确认状态异常",
+                        "consultation_material_intent_integrity_failed",
+                    )
+                result = _material_document_view(existing)
+                existing_expires_at = existing.expires_at
+                if existing_expires_at.tzinfo is None:
+                    existing_expires_at = existing_expires_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                if existing_expires_at <= now:
+                    result["status"] = MaterialDocumentStatus.EXPIRED.value
+                return result
+            expires_at = intent.expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= now:
+                raise GoneError(
+                    "材料生成确认已过期",
+                    "consultation_material_intent_expired",
+                )
+            chat = await session.get(ChatSession, session_id, with_for_update=True)
+            if chat is None or chat.owner_account_id != owner_account_id:
+                raise ResourceNotFound("咨询会话")
+            service = await _require_material_document_service_published(
+                session, intent.service_id
+            )
+            if service.current_version_id != intent.service_version_id:
+                raise ConflictError(
+                    "事项版本已更新，请重新选择材料模板",
+                    "consultation_material_intent_stale",
+                )
+            if (
+                service_version.service_id != service.id
+                or not service_version.immutable
+                or requirement.service_version_id != service_version.id
+                or requirement.code != intent.requirement_code
+                or template.material_requirement_id != requirement.id
+                or not template.active
+                or template.mode == MaterialTemplateMode.NOT_GENERATABLE.value
+                or not template.source_object_key
+                or not template.source_sha256
+            ):
+                raise ConflictError(
+                    "材料模板已更新，请重新选择",
+                    "consultation_material_intent_stale",
+                )
+            await _enforce_material_document_job_limits(
+                session,
+                owner_account_id,
+                now,
+                user_daily_limit=user_daily_limit,
+                user_active_limit=user_active_limit,
+                global_daily_limit=global_daily_limit,
+                global_queue_limit=global_queue_limit,
+            )
+            record = MaterialDocumentJobRecord(
+                owner_account_id=owner_account_id,
+                scope=MaterialDocumentScope.CONSULTATION.value,
+                service_id=service.id,
+                service_version_id=service_version.id,
+                application_id=None,
+                consultation_session_id=session_id,
+                consultation_intent_id=intent.id,
+                material_requirement_id=requirement.id,
+                template_id=template.id,
+                requirement_code=requirement.code,
+                application_version=None,
+                template_key_snapshot=template.template_key,
+                template_version_snapshot=template.version,
+                template_title_snapshot=template.title,
+                template_mode_snapshot=template.mode,
+                allowed_fields_snapshot=list(template.allowed_fields),
+                source_object_key_snapshot=template.source_object_key,
+                source_sha256_snapshot=template.source_sha256,
+                model_name_snapshot=model_name[:128],
+                release_lane=release_lane,
+                status=MaterialDocumentStatus.QUEUED.value,
+                form_snapshot={},
+                # Consultation generation is deliberately a blank-template
+                # operation. Chat prose/history must never reach the worker or
+                # the external analyzer provider.
+                request_text=None,
+                expires_at=job_expires_at,
+            )
+            session.add(record)
+            await session.flush()
+            intent.status = ConsultationMaterialIntentStatus.CONFIRMED.value
+            intent.confirmed_at = now
+            await self._audit(
+                session,
+                owner_account_id,
+                "consultation_material.intent_confirmed",
+                "consultation_material_intent",
+                intent.id,
+                {
+                    "generation_id": str(record.id),
+                    "session_id": str(session_id),
+                    "service_id": str(service.id),
+                    "requirement_code": requirement.code,
+                },
+            )
+            return _material_document_view(record)
+
+    async def create_material_document_job(
+        self,
+        owner_account_id: UUID,
+        application_id: UUID,
+        requirement_code: str,
+        template_id: UUID,
+        request_text: str | None,
+        expires_at: datetime,
+        model_name: str,
+        release_lane: str,
+        user_daily_limit: int,
+        user_active_limit: int,
+        global_daily_limit: int,
+        global_queue_limit: int,
+    ) -> dict[str, Any]:
+        async with self._transaction() as session:
+            app = await session.get(ApplicationRecord, application_id, with_for_update=True)
+            if app is None or app.applicant_id != owner_account_id:
+                raise ResourceNotFound("办件")
+            if app.status not in {
+                ApplicationStatus.DRAFT.value,
+                ApplicationStatus.NEEDS_SUPPLEMENT.value,
+            }:
+                raise ConflictError(
+                    "当前办件状态不允许生成材料", "material_document_state_conflict"
+                )
+            await _require_material_document_service_published(session, app.service_id)
+            requirement = await session.scalar(
+                select(MaterialRequirementRecord).where(
+                    MaterialRequirementRecord.service_version_id
+                    == app.service_version_id,
+                    MaterialRequirementRecord.code == requirement_code,
+                )
+            )
+            template = await session.get(MaterialTemplateRecord, template_id)
+            if (
+                requirement is None
+                or template is None
+                or template.material_requirement_id != requirement.id
+                or not template.active
+                or template.mode == MaterialTemplateMode.NOT_GENERATABLE.value
+                or not template.source_object_key
+                or not template.source_sha256
+            ):
+                raise ResourceNotFound("可生成材料模板")
+            await _enforce_material_document_job_limits(
+                session,
+                owner_account_id,
+                datetime.now(timezone.utc),
+                user_daily_limit=user_daily_limit,
+                user_active_limit=user_active_limit,
+                global_daily_limit=global_daily_limit,
+                global_queue_limit=global_queue_limit,
+            )
+            snapshot = _project_form_snapshot(app.form_data, template.allowed_fields)
+            record = MaterialDocumentJobRecord(
+                owner_account_id=owner_account_id,
+                scope=MaterialDocumentScope.APPLICATION.value,
+                service_id=app.service_id,
+                service_version_id=app.service_version_id,
+                application_id=application_id,
+                consultation_session_id=None,
+                consultation_intent_id=None,
+                material_requirement_id=requirement.id,
+                template_id=template.id,
+                requirement_code=requirement.code,
+                application_version=app.version,
+                template_key_snapshot=template.template_key,
+                template_version_snapshot=template.version,
+                template_title_snapshot=template.title,
+                template_mode_snapshot=template.mode,
+                allowed_fields_snapshot=list(template.allowed_fields),
+                source_object_key_snapshot=template.source_object_key,
+                source_sha256_snapshot=template.source_sha256,
+                model_name_snapshot=model_name[:128],
+                release_lane=release_lane,
+                status=MaterialDocumentStatus.QUEUED.value,
+                form_snapshot=snapshot,
+                request_text=request_text,
+                expires_at=expires_at,
+            )
+            session.add(record)
+            await session.flush()
+            await self._audit(
+                session,
+                owner_account_id,
+                "material_document.queued",
+                "material_document",
+                record.id,
+                {
+                    "application_id": str(application_id),
+                    "requirement_code": requirement.code,
+                    "template_key": template.template_key,
+                    "template_version": template.version,
+                },
+            )
+            return _material_document_view(record)
+
+    async def get_material_document_job_authorized(
+        self, generation_id: UUID, owner_account_id: UUID
+    ) -> dict[str, Any]:
+        async with self.sessions() as session:
+            record = await session.get(MaterialDocumentJobRecord, generation_id)
+            if record is None or record.owner_account_id != owner_account_id:
+                raise ResourceNotFound("生成文档")
+            now = datetime.now(timezone.utc)
+            result = _material_document_view(record, include_object=True)
+            # Derive EXPIRED for the client, but leave the persisted terminal
+            # status intact until the worker atomically claims the object key
+            # for deletion. Mutating here would make cleanup skip the object.
+            if record.expires_at <= now:
+                result["status"] = MaterialDocumentStatus.EXPIRED.value
+            return result
+
+    async def lease_material_document_job(
+        self, lease_seconds: int, release_lane: str
+    ) -> LeasedMaterialDocumentJob | None:
+        now = datetime.now(timezone.utc)
+        async with self.sessions.begin() as session:
+            stale = list(
+                (
+                    await session.scalars(
+                        select(MaterialDocumentJobRecord)
+                        .where(
+                            MaterialDocumentJobRecord.release_lane == release_lane,
+                            MaterialDocumentJobRecord.status
+                            == MaterialDocumentStatus.RUNNING.value,
+                            MaterialDocumentJobRecord.leased_until < now,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            for item in stale:
+                item.status = MaterialDocumentStatus.FAILED.value
+                item.error_code = "WORKER_INTERRUPTED"
+                item.form_snapshot = None
+                item.request_text = None
+                item.lease_token = None
+                item.leased_until = None
+            job = await session.scalar(
+                select(MaterialDocumentJobRecord)
+                .where(
+                    MaterialDocumentJobRecord.release_lane == release_lane,
+                    MaterialDocumentJobRecord.status
+                    == MaterialDocumentStatus.QUEUED.value,
+                    MaterialDocumentJobRecord.expires_at > now,
+                )
+                .order_by(MaterialDocumentJobRecord.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if job is None:
+                return None
+            token = uuid4()
+            job.status = MaterialDocumentStatus.RUNNING.value
+            job.lease_token = token
+            job.leased_until = now + timedelta(seconds=lease_seconds)
+            snapshot = job.form_snapshot
+            fields = job.allowed_fields_snapshot
+            try:
+                template_mode = MaterialTemplateMode(job.template_mode_snapshot)
+            except ValueError:
+                template_mode = None
+            try:
+                scope = MaterialDocumentScope(job.scope)
+            except ValueError:
+                scope = None
+            context_valid = bool(
+                scope is MaterialDocumentScope.APPLICATION
+                and job.application_id is not None
+                and job.consultation_session_id is None
+                and job.consultation_intent_id is None
+            ) or bool(
+                scope is MaterialDocumentScope.CONSULTATION
+                and job.application_id is None
+                and job.consultation_session_id is not None
+                and job.consultation_intent_id is not None
+            )
+            if (
+                not isinstance(snapshot, dict)
+                or not isinstance(fields, list)
+                or any(not isinstance(item, str) for item in fields)
+                or template_mode is None
+                or scope is None
+                or not context_valid
+                or not job.service_id
+                or not job.service_version_id
+                or not job.template_key_snapshot
+                or not job.template_title_snapshot
+                or not job.source_object_key_snapshot
+                or not job.source_sha256_snapshot
+                or not job.model_name_snapshot
+            ):
+                job.status = MaterialDocumentStatus.FAILED.value
+                job.error_code = "JOB_SNAPSHOT_INVALID"
+                job.form_snapshot = None
+                job.request_text = None
+                job.lease_token = None
+                job.leased_until = None
+                return None
+            return LeasedMaterialDocumentJob(
+                id=job.id,
+                owner_account_id=job.owner_account_id,
+                application_id=job.application_id,
+                requirement_code=job.requirement_code,
+                template_id=job.template_id,
+                template_key=job.template_key_snapshot,
+                template_title=job.template_title_snapshot,
+                template_mode=template_mode,
+                allowed_fields=tuple(fields),
+                source_object_key=job.source_object_key_snapshot,
+                source_sha256=job.source_sha256_snapshot,
+                form_snapshot=dict(snapshot),
+                request_text=job.request_text,
+                model_name=job.model_name_snapshot,
+                lease_token=token,
+                scope=scope,
+                consultation_session_id=job.consultation_session_id,
+            )
+
+    async def renew_material_document_job_lease(
+        self, generation_id: UUID, lease_token: UUID, lease_seconds: int
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        async with self.sessions.begin() as session:
+            result = await session.execute(
+                update(MaterialDocumentJobRecord)
+                .where(
+                    MaterialDocumentJobRecord.id == generation_id,
+                    MaterialDocumentJobRecord.status
+                    == MaterialDocumentStatus.RUNNING.value,
+                    MaterialDocumentJobRecord.lease_token == lease_token,
+                )
+                .values(
+                    leased_until=now + timedelta(seconds=lease_seconds),
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 1:
+                return True
+            # Completion clears the lease token atomically. A heartbeat that
+            # was already in flight may observe READY immediately after the
+            # worker committed its own output; that is success, not lease loss.
+            status = await session.scalar(
+                select(MaterialDocumentJobRecord.status).where(
+                    MaterialDocumentJobRecord.id == generation_id
+                )
+            )
+            return status == MaterialDocumentStatus.READY.value
+
+    async def complete_material_document_job(
+        self,
+        generation_id: UUID,
+        lease_token: UUID,
+        object_key: str,
+        filename: str,
+        size_bytes: int,
+        sha256: str,
+        model_name: str,
+        warnings: tuple[str, ...],
+    ) -> bool:
+        async with self.sessions.begin() as session:
+            result = await session.execute(
+                update(MaterialDocumentJobRecord)
+                .where(
+                    MaterialDocumentJobRecord.id == generation_id,
+                    MaterialDocumentJobRecord.status
+                    == MaterialDocumentStatus.RUNNING.value,
+                    MaterialDocumentJobRecord.lease_token == lease_token,
+                )
+                .values(
+                    status=MaterialDocumentStatus.READY.value,
+                    output_object_key=object_key,
+                    filename=filename[:255],
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                    model_name=model_name[:128],
+                    warnings=list(warnings),
+                    error_code=None,
+                    form_snapshot=None,
+                    request_text=None,
+                    lease_token=None,
+                    leased_until=None,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            return result.rowcount == 1
+
+    async def fail_material_document_job(
+        self, generation_id: UUID, lease_token: UUID, error_code: str
+    ) -> bool:
+        async with self.sessions.begin() as session:
+            result = await session.execute(
+                update(MaterialDocumentJobRecord)
+                .where(
+                    MaterialDocumentJobRecord.id == generation_id,
+                    MaterialDocumentJobRecord.status
+                    == MaterialDocumentStatus.RUNNING.value,
+                    MaterialDocumentJobRecord.lease_token == lease_token,
+                )
+                .values(
+                    status=MaterialDocumentStatus.FAILED.value,
+                    error_code=error_code[:64],
+                    form_snapshot=None,
+                    request_text=None,
+                    lease_token=None,
+                    leased_until=None,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            return result.rowcount == 1
+
+    async def expire_material_document_jobs(
+        self, now: datetime
+    ) -> list[str]:
+        async with self.sessions.begin() as session:
+            records = list(
+                (
+                    await session.scalars(
+                        select(MaterialDocumentJobRecord)
+                        .where(
+                            MaterialDocumentJobRecord.expires_at <= now,
+                            MaterialDocumentJobRecord.status.in_(
+                                [
+                                    MaterialDocumentStatus.READY.value,
+                                    MaterialDocumentStatus.FAILED.value,
+                                    MaterialDocumentStatus.QUEUED.value,
+                                ]
+                            ),
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            keys = [
+                item.output_object_key
+                for item in records
+                if item.output_object_key
+            ]
+            for item in records:
+                item.status = MaterialDocumentStatus.EXPIRED.value
+                item.output_object_key = None
+                item.form_snapshot = None
+                item.request_text = None
+                item.lease_token = None
+                item.leased_until = None
+            return keys
+
     async def _insert_version(self, session: AsyncSession, service_id: UUID, version_number: int, values: dict[str, Any]) -> ServiceVersionRecord:
         version = ServiceVersionRecord(
             service_id=service_id, version=version_number, title=values["title"], summary=values["summary"],
@@ -2071,7 +3697,7 @@ class BusinessRepository:
             service.external_item_id,
             bool(version and version.delivery_supported),
         )
-        return {"id": service.id, "external_item_id": service.external_item_id, "code": service.code, "title": version.title if version else "未命名事项", "summary": version.summary if version else "", "applicant_type": service.applicant_type, "status": service.status, "fee_required": version.fee_required if version else False, "fee_cents": version.fee_cents if version else 0, "fee_calculation": version.fee_calculation if version else None, "appointment_supported": version.appointment_supported if version else False, "requires_appointment": version.requires_appointment if version else False, "requires_verification": version.requires_verification if version else False, "delivery_supported": bool(delivery["supported"]), "delivery_options": delivery["options"], "mail_supported": delivery["mail_supported"], "demo_mail_supported": delivery["demo_mail_supported"], "demo_data": True}
+        return {"id": service.id, "external_item_id": service.external_item_id, "code": service.code, "title": version.title if version else "未命名事项", "summary": version.summary if version else "", "applicant_type": service.applicant_type, "status": service.status, "handling_mode": service.handling_mode, "online_status": service.online_status, "status_reason": service.status_reason, "status_updated_at": service.status_updated_at, "fee_required": version.fee_required if version else False, "fee_cents": version.fee_cents if version else 0, "fee_calculation": version.fee_calculation if version else None, "appointment_supported": version.appointment_supported if version else False, "requires_appointment": version.requires_appointment if version else False, "requires_verification": version.requires_verification if version else False, "delivery_supported": bool(delivery["supported"]), "delivery_options": delivery["options"], "mail_supported": delivery["mail_supported"], "demo_mail_supported": delivery["demo_mail_supported"], "demo_data": True}
 
     @staticmethod
     def _material_dict(item: MaterialRequirementRecord) -> dict[str, Any]:
@@ -2083,7 +3709,27 @@ class BusinessRepository:
 
     @staticmethod
     def _window_dict(item: ServiceWindowRecord) -> dict[str, Any]:
-        return {"id": item.id, "department_id": item.department_id, "code": item.code, "name": item.name, "address": item.address, "latitude": float(item.latitude), "longitude": float(item.longitude), "opening_hours": item.opening_hours, "capacity_per_slot": item.capacity_per_slot, "active": item.active, "coordinate_type": "DEMO_GCJ02", "demo_data": True}
+        return {"id": item.id, "department_id": item.department_id, "code": item.code, "name": item.name, "address": item.address, "latitude": float(item.latitude), "longitude": float(item.longitude), "city_code": item.city_code, "opening_hours": item.opening_hours, "capacity_per_slot": item.capacity_per_slot, "active": item.active, "coordinate_type": item.coordinate_type, "data_mode": item.data_mode, "source_reference": item.source_reference, "verified_at": item.verified_at, "demo_data": item.data_mode == "DEMO"}
+
+    @staticmethod
+    def _navigation_window_dict(
+        item: ServiceWindowRecord, priority: int
+    ) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "code": item.code,
+            "name": item.name,
+            "address": item.address,
+            "opening_hours": item.opening_hours,
+            "latitude": float(item.latitude),
+            "longitude": float(item.longitude),
+            "coordinate_type": item.coordinate_type,
+            "priority": priority,
+            "data_mode": item.data_mode,
+            "city_code": item.city_code,
+            "source_reference": item.source_reference,
+            "verified_at": item.verified_at,
+        }
 
     @staticmethod
     def _handoff_dict(item: HandoffTicketRecord) -> dict[str, Any]:

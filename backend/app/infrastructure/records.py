@@ -80,6 +80,16 @@ class RefreshTokenRecord(Base):
 
 class ServiceWindowRecord(Base, TimestampMixin):
     __tablename__ = "service_windows"
+    __table_args__ = (
+        CheckConstraint(
+            "coordinate_type IN ('GCJ02')",
+            name="ck_service_windows_coordinate_type",
+        ),
+        CheckConstraint(
+            "data_mode IN ('DEMO', 'VERIFIED')",
+            name="ck_service_windows_data_mode",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     department_id: Mapped[UUID] = mapped_column(
@@ -90,6 +100,13 @@ class ServiceWindowRecord(Base, TimestampMixin):
     address: Mapped[str] = mapped_column(String(255))
     latitude: Mapped[float] = mapped_column(Numeric(10, 7))
     longitude: Mapped[float] = mapped_column(Numeric(10, 7))
+    city_code: Mapped[str] = mapped_column(String(32), default="DEMO")
+    coordinate_type: Mapped[str] = mapped_column(String(16), default="GCJ02")
+    data_mode: Mapped[str] = mapped_column(String(16), default="DEMO")
+    source_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     opening_hours: Mapped[str] = mapped_column(String(120), default="工作日 09:00-17:00")
     capacity_per_slot: Mapped[int] = mapped_column(Integer, default=10)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -118,6 +135,14 @@ class StaffAssignmentRecord(Base):
 class GovernmentServiceRecord(Base, TimestampMixin):
     __tablename__ = "government_services"
     __table_args__ = (
+        CheckConstraint(
+            "handling_mode IN ('ONLINE_ONLY', 'OFFLINE_ONLY', 'BOTH', 'UNKNOWN')",
+            name="ck_government_services_handling_mode",
+        ),
+        CheckConstraint(
+            "online_status IN ('AVAILABLE', 'TEMP_UNAVAILABLE', 'UNKNOWN')",
+            name="ck_government_services_online_status",
+        ),
         Index("ix_government_services_code", "code"),
         Index("ix_government_services_external_item_id", "external_item_id"),
     )
@@ -133,6 +158,12 @@ class GovernmentServiceRecord(Base, TimestampMixin):
     )
     applicant_type: Mapped[str] = mapped_column(String(16), index=True)
     status: Mapped[str] = mapped_column(String(20), default="DRAFT", index=True)
+    handling_mode: Mapped[str] = mapped_column(String(20), default="UNKNOWN")
+    online_status: Mapped[str] = mapped_column(String(24), default="UNKNOWN")
+    status_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     current_version_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey(
@@ -143,6 +174,36 @@ class GovernmentServiceRecord(Base, TimestampMixin):
         ),
         nullable=True,
     )
+
+
+class ServiceWindowLinkRecord(Base, TimestampMixin):
+    __tablename__ = "service_window_links"
+    __table_args__ = (
+        CheckConstraint(
+            "priority >= 0 AND priority <= 1000",
+            name="ck_service_window_links_priority",
+        ),
+        Index(
+            "ix_service_window_links_active_priority",
+            "service_id",
+            "active",
+            "priority",
+        ),
+    )
+
+    service_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("government_services.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    window_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("service_windows.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ServiceVersionRecord(Base):
@@ -199,6 +260,203 @@ class MaterialRequirementRecord(Base):
     condition_json: Mapped[dict[str, Any] | None] = mapped_column("condition", JSON, nullable=True)
     accepted_types: Mapped[list[str]] = mapped_column(JSON, default=list)
     order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class MaterialTemplateRecord(Base, TimestampMixin):
+    __tablename__ = "material_templates"
+    __table_args__ = (
+        UniqueConstraint(
+            "template_key",
+            "material_requirement_id",
+            name="uq_material_templates_key_requirement",
+        ),
+        CheckConstraint(
+            "mode IN ('SOURCE_EDITABLE', 'VISUAL_RECONSTRUCT', 'NOT_GENERATABLE')",
+            name="ck_material_templates_mode",
+        ),
+        Index(
+            "ix_material_templates_requirement_active",
+            "material_requirement_id",
+            "active",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    material_requirement_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("material_requirements.id", ondelete="CASCADE"),
+        index=True,
+    )
+    template_key: Mapped[str] = mapped_column(String(96))
+    service_code: Mapped[str] = mapped_column(String(64), index=True)
+    requirement_code: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    mode: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    source_object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    allowed_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    notice: Mapped[str] = mapped_column(
+        String(500),
+        default="演示模板，仅供项目填写演示，不作为正式政务表格。",
+    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+
+class ConsultationMaterialIntentRecord(Base, TimestampMixin):
+    __tablename__ = "consultation_material_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'CONFIRMED')",
+            name="ck_consultation_material_intents_status",
+        ),
+        Index(
+            "ix_consultation_material_intents_owner_session_status",
+            "owner_account_id",
+            "session_id",
+            "status",
+        ),
+        Index("ix_consultation_material_intents_expires", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    owner_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    service_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("government_services.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    service_version_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("service_versions.id", ondelete="RESTRICT")
+    )
+    material_requirement_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("material_requirements.id", ondelete="RESTRICT")
+    )
+    template_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("material_templates.id", ondelete="RESTRICT")
+    )
+    requirement_code: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MaterialDocumentJobRecord(Base, TimestampMixin):
+    __tablename__ = "material_document_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'READY', 'FAILED', 'EXPIRED')",
+            name="ck_material_document_jobs_status",
+        ),
+        CheckConstraint(
+            "template_mode_snapshot IN ('SOURCE_EDITABLE', 'VISUAL_RECONSTRUCT')",
+            name="ck_material_document_jobs_template_mode_snapshot",
+        ),
+        CheckConstraint(
+            "scope IN ('APPLICATION', 'CONSULTATION')",
+            name="ck_material_document_jobs_scope",
+        ),
+        CheckConstraint(
+            "(scope = 'APPLICATION' AND application_id IS NOT NULL "
+            "AND application_version IS NOT NULL AND consultation_session_id IS NULL "
+            "AND consultation_intent_id IS NULL) OR "
+            "(scope = 'CONSULTATION' AND application_id IS NULL "
+            "AND application_version IS NULL AND consultation_session_id IS NOT NULL "
+            "AND consultation_intent_id IS NOT NULL)",
+            name="ck_material_document_jobs_context",
+        ),
+        Index(
+            "ix_material_document_jobs_lease",
+            "release_lane",
+            "status",
+            "leased_until",
+            "created_at",
+        ),
+        Index(
+            "ix_material_document_jobs_owner_created",
+            "owner_account_id",
+            "created_at",
+        ),
+        Index(
+            "ix_material_document_jobs_owner_status_created",
+            "owner_account_id",
+            "status",
+            "created_at",
+        ),
+        Index("ix_material_document_jobs_expires", "expires_at"),
+        UniqueConstraint(
+            "consultation_intent_id",
+            name="uq_material_document_jobs_consultation_intent",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    owner_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    scope: Mapped[str] = mapped_column(String(16), default="APPLICATION", index=True)
+    service_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("government_services.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    service_version_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("service_versions.id", ondelete="RESTRICT")
+    )
+    application_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    consultation_session_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=True,
+    )
+    consultation_intent_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("consultation_material_intents.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    material_requirement_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("material_requirements.id", ondelete="RESTRICT")
+    )
+    template_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("material_templates.id", ondelete="RESTRICT")
+    )
+    requirement_code: Mapped[str] = mapped_column(String(64))
+    application_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    template_key_snapshot: Mapped[str] = mapped_column(String(96))
+    template_version_snapshot: Mapped[int] = mapped_column(Integer)
+    template_title_snapshot: Mapped[str] = mapped_column(String(200))
+    template_mode_snapshot: Mapped[str] = mapped_column(String(32))
+    allowed_fields_snapshot: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_object_key_snapshot: Mapped[str] = mapped_column(String(500))
+    source_sha256_snapshot: Mapped[str] = mapped_column(String(64))
+    model_name_snapshot: Mapped[str] = mapped_column(String(128))
+    release_lane: Mapped[str] = mapped_column(String(128), default="legacy", index=True)
+    status: Mapped[str] = mapped_column(String(16), default="QUEUED", index=True)
+    form_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    leased_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    output_object_key: Mapped[str | None] = mapped_column(String(500), nullable=True, unique=True)
+    filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ProcessStepRecord(Base):

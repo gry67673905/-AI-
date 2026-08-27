@@ -40,6 +40,7 @@ prepare_app_runtime() {
             require_secret_file metastudio_app_key
             require_secret_file metastudio_huawei_access_key
             require_secret_file metastudio_huawei_secret_key
+            require_secret_file vision_dashscope_api_key
             install -o app -g app -m 400 \
                 /run/secrets/metastudio_app_key \
                 /tmp/smartgov-app-secrets/metastudio_app_key
@@ -49,9 +50,38 @@ prepare_app_runtime() {
             install -o app -g app -m 400 \
                 /run/secrets/metastudio_huawei_secret_key \
                 /tmp/smartgov-app-secrets/metastudio_huawei_secret_key
+            install -o app -g app -m 400 \
+                /run/secrets/vision_dashscope_api_key \
+                /tmp/smartgov-app-secrets/vision_dashscope_api_key
             export METASTUDIO_APP_KEY_FILE=/tmp/smartgov-app-secrets/metastudio_app_key
             export METASTUDIO_HUAWEI_ACCESS_KEY_FILE=/tmp/smartgov-app-secrets/metastudio_huawei_access_key
             export METASTUDIO_HUAWEI_SECRET_KEY_FILE=/tmp/smartgov-app-secrets/metastudio_huawei_secret_key
+            export VISION_DASHSCOPE_API_KEY_FILE=/tmp/smartgov-app-secrets/vision_dashscope_api_key
+            ;;
+    esac
+}
+
+prepare_material_worker_runtime() {
+    install -d -o app -g app -m 700 \
+        /tmp/material-worker-home \
+        /tmp/material-worker-profile \
+        /tmp/material-worker-secrets
+    export HOME=/tmp/material-worker-home
+    export USER=app
+    export LOGNAME=app
+    export TMPDIR=/tmp
+    case "${MATERIAL_TEMPLATE_PROVIDER:-mock}" in
+        dashscope)
+            require_secret_file vision_dashscope_api_key
+            install -o app -g app -m 400 \
+                /run/secrets/vision_dashscope_api_key \
+                /tmp/material-worker-secrets/vision_dashscope_api_key
+            export MATERIAL_TEMPLATE_DASHSCOPE_API_KEY_FILE=/tmp/material-worker-secrets/vision_dashscope_api_key
+            ;;
+        mock) ;;
+        *)
+            echo "Unsupported material template provider." >&2
+            exit 78
             ;;
     esac
 }
@@ -81,7 +111,17 @@ case "$service_kind" in
         # Uvicorn's raw request log includes query strings; Nginx owns cloud
         # access logging so MetaStudio MSS_A arguments never reach Docker logs.
         exec setpriv --reuid=app --regid=app --init-groups \
-            sh -c 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*" --no-access-log'
+            sh -c 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --ws-max-size 1100000 --proxy-headers --forwarded-allow-ips="*" --no-access-log'
+        ;;
+    material-worker)
+        read_secret postgres_password POSTGRES_PASSWORD
+        read_secret minio_root_user MINIO_ACCESS_KEY
+        read_secret minio_root_password MINIO_SECRET_KEY
+        prepare_material_worker_runtime
+        export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+        unset POSTGRES_PASSWORD
+        exec setpriv --reuid=app --regid=app --init-groups \
+            python -m app.ops.material_document_worker
         ;;
     redis)
         read_secret redis_password REDIS_PASSWORD
@@ -123,10 +163,11 @@ case "$service_kind" in
     minio-backup)
         read_secret minio_root_user MINIO_ROOT_USER
         read_secret minio_root_password MINIO_ROOT_PASSWORD
-        mkdir -p /backup/materials /backup/knowledge
+        mkdir -p /backup/materials /backup/knowledge /backup/material-templates
         mc alias set smartgov http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
         mc mirror --overwrite "smartgov/${MATERIALS_BUCKET:-smart-gov-materials}" /backup/materials >/dev/null
         mc mirror --overwrite "smartgov/${KNOWLEDGE_BUCKET:-smart-gov-knowledge}" /backup/knowledge >/dev/null
+        mc mirror --overwrite "smartgov/${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}" /backup/material-templates >/dev/null
         printf '%s\n' "MinIO object backup completed."
         ;;
     *)

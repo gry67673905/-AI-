@@ -68,17 +68,6 @@ public final class DigitalHumanCoordinator {
             callback.onDuplicate();
             return;
         }
-        if (role == Role.ANONYMOUS) {
-            callback.onSuccess(new NavigationIntent(
-                semantic.getIntentId(),
-                "OPEN_LOGIN",
-                "请先登录后继续",
-                "login",
-                new JsonObject(),
-                true
-            ));
-            return;
-        }
         gateway.exchangeActionIntent(
             semantic.getIntentId(),
             current.getSessionId(),

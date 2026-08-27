@@ -1,0 +1,236 @@
+name: smart-gov-cloud-demo
+
+# Parallel API candidate. This override is always composed with
+# compose.cloud.yaml (and compose.metastudio.yaml when enabled), so it shares
+# the existing private network, databases and Docker secrets without changing
+# or recreating the canonical `api` service on 127.0.0.1:18000.
+services:
+  api-candidate:
+    profiles: ["candidate"]
+    image: smart-gov/api:${RELEASE_TAG:?set RELEASE_TAG for the candidate}
+    build:
+      context: ./backend
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "api"]
+    user: "0:0"
+    environment:
+      ENVIRONMENT: demo
+      METASTUDIO_ENABLED: "true"
+      METASTUDIO_APP_ID: ${METASTUDIO_APP_ID:?set METASTUDIO_APP_ID}
+      METASTUDIO_APP_KEY_FILE: /run/secrets/metastudio_app_key
+      METASTUDIO_CALLBACK_URL: ${METASTUDIO_CALLBACK_URL:?set METASTUDIO_CALLBACK_URL}
+      METASTUDIO_PROJECT_ID: ${METASTUDIO_PROJECT_ID:?set METASTUDIO_PROJECT_ID}
+      METASTUDIO_ROBOT_ID: ${METASTUDIO_ROBOT_ID:?set METASTUDIO_ROBOT_ID}
+      METASTUDIO_HUAWEI_ACCESS_KEY_FILE: /run/secrets/metastudio_huawei_access_key
+      METASTUDIO_HUAWEI_SECRET_KEY_FILE: /run/secrets/metastudio_huawei_secret_key
+      METASTUDIO_REGION: ${METASTUDIO_REGION:-cn-north-4}
+      METASTUDIO_ONCE_CODE_ENDPOINT: ${METASTUDIO_ONCE_CODE_ENDPOINT:-https://metastudio.cn-north-4.myhuaweicloud.com}
+      METASTUDIO_SERVER_ADDRESS: ${METASTUDIO_SERVER_ADDRESS:-metastudio-api.cn-north-4.myhuaweicloud.com}
+      METASTUDIO_REPLAY_WINDOW_SECONDS: ${METASTUDIO_REPLAY_WINDOW_SECONDS:-300}
+      METASTUDIO_CONTEXT_TTL_SECONDS: ${METASTUDIO_CONTEXT_TTL_SECONDS:-1800}
+      METASTUDIO_ACTION_INTENT_TTL_SECONDS: ${METASTUDIO_ACTION_INTENT_TTL_SECONDS:-300}
+      METASTUDIO_SESSION_QUOTA_ANONYMOUS_DAILY: ${METASTUDIO_SESSION_QUOTA_ANONYMOUS_DAILY:-5}
+      METASTUDIO_SESSION_QUOTA_AUTHENTICATED_DAILY: ${METASTUDIO_SESSION_QUOTA_AUTHENTICATED_DAILY:-10}
+      METASTUDIO_SESSION_QUOTA_GLOBAL_DAILY: ${METASTUDIO_SESSION_QUOTA_GLOBAL_DAILY:-100}
+      VISION_ENABLED: "true"
+      VISION_PROVIDER: ${VISION_PROVIDER:-dashscope}
+      VISION_DASHSCOPE_API_KEY_FILE: /run/secrets/vision_dashscope_api_key
+      VISION_DASHSCOPE_BASE_URL: ${VISION_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      VISION_DOCUMENT_TIMEOUT_SECONDS: ${VISION_DOCUMENT_TIMEOUT_SECONDS:-20}
+      VISION_FAST_PROVIDER: ${VISION_FAST_PROVIDER:-mock}
+      VISION_FAST_HTTP_URL: ${VISION_FAST_HTTP_URL:-}
+      VISION_FAST_TIMEOUT_SECONDS: ${VISION_FAST_TIMEOUT_SECONDS:-0.5}
+      VISION_FAST_MAX_CONCURRENCY: ${VISION_FAST_MAX_CONCURRENCY:-2}
+      VISION_TIMELINE_TTL_SECONDS: ${VISION_TIMELINE_TTL_SECONDS:-120}
+      VISION_TIMELINE_MAX_EVENTS: ${VISION_TIMELINE_MAX_EVENTS:-128}
+      VISION_SEALED_TURN_CAPACITY: ${VISION_SEALED_TURN_CAPACITY:-2}
+      VISION_LATE_MEMORY_TTL_SECONDS: ${VISION_LATE_MEMORY_TTL_SECONDS:-120}
+      VISION_TURN_CLOSE_WAIT_MS: ${VISION_TURN_CLOSE_WAIT_MS:-2000}
+      VISION_ANALYSIS_GLOBAL_DAILY: ${VISION_ANALYSIS_GLOBAL_DAILY:-20}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
+      POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
+      REDIS_HOST: redis
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
+      MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-gov_knowledge_v2}
+      RAG_GROUP_ENABLED: ${RAG_GROUP_ENABLED:-false}
+      RAG_DATASET_VERSION: ${RAG_DATASET_VERSION:-team-2026-08-22-v1}
+      RAG_ARCHIVE_SHA256: ${RAG_ARCHIVE_SHA256:-b5221f51465a230192148cb8e3db81a81e21348809a2738ca8ce89d8f6543f93}
+      RAG_EXPECTED_CHUNK_COUNT: ${RAG_EXPECTED_CHUNK_COUNT:-15858}
+      RAG_EXPECTED_ROUTE_COUNT: ${RAG_EXPECTED_ROUTE_COUNT:-1012}
+      RAG_GROUP_COLLECTION_PREFIX: ${RAG_GROUP_COLLECTION_PREFIX:-gov_group_rag}
+      RAG_GROUP_COLLECTION_ALIAS: ${RAG_GROUP_COLLECTION_ALIAS:-gov_group_rag_active}
+      RAG_GROUP_ROUTE_ALIAS: ${RAG_GROUP_ROUTE_ALIAS:-gov_group_rag_route_active}
+      DASHSCOPE_API_KEY_FILE: /run/secrets/dashscope_api_key
+      DASHSCOPE_EMBEDDING_BASE_URL: ${DASHSCOPE_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v4}
+      DASHSCOPE_EMBEDDING_DIMENSION: ${DASHSCOPE_EMBEDDING_DIMENSION:-1024}
+      DASHSCOPE_EMBEDDING_TIMEOUT_SECONDS: ${DASHSCOPE_EMBEDDING_TIMEOUT_SECONDS:-30}
+      DASHSCOPE_EMBEDDING_MAX_RETRIES: ${DASHSCOPE_EMBEDDING_MAX_RETRIES:-2}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MAX_MATERIAL_BYTES: ${MAX_MATERIAL_BYTES:-10485760}
+      MATERIAL_DOCUMENTS_ENABLED: ${MATERIAL_DOCUMENTS_ENABLED:-true}
+      MATERIAL_TEMPLATE_SOURCE_PREFIX: ${MATERIAL_TEMPLATE_SOURCE_PREFIX:-material-templates/v1}
+      MATERIAL_TEMPLATE_MANIFEST_PATH: ${MATERIAL_TEMPLATE_MANIFEST_PATH:-resources/material_templates/v1/manifest.json}
+      MATERIAL_TEMPLATE_PROVIDER: ${MATERIAL_TEMPLATE_PROVIDER:-dashscope}
+      MATERIAL_TEMPLATE_MODEL: ${MATERIAL_TEMPLATE_MODEL:-qwen3-vl-flash-2026-01-22}
+      MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL: ${MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
+      GENERATED_DOCUMENTS_BUCKET: ${GENERATED_DOCUMENTS_BUCKET:-smart-gov-generated-documents}
+      MATERIAL_DOCUMENT_RETENTION_HOURS: ${MATERIAL_DOCUMENT_RETENTION_HOURS:-24}
+      MATERIAL_DOCUMENT_USER_DAILY_LIMIT: ${MATERIAL_DOCUMENT_USER_DAILY_LIMIT:-10}
+      MATERIAL_DOCUMENT_USER_ACTIVE_LIMIT: ${MATERIAL_DOCUMENT_USER_ACTIVE_LIMIT:-2}
+      MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT: ${MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT:-20}
+      MATERIAL_DOCUMENT_GLOBAL_QUEUE_LIMIT: ${MATERIAL_DOCUMENT_GLOBAL_QUEUE_LIMIT:-50}
+      MATERIAL_DOCUMENT_RELEASE_LANE: ${RELEASE_TAG:?set RELEASE_TAG for the candidate}
+      MCP_URL: ${MCP_URL:-http://mcp-server:3000/mcp}
+      MCP_HEALTH_URL: ${MCP_HEALTH_URL:-http://mcp-server:3000/health}
+      MOCK_GOV_API_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
+      JWT_ACCESS_MINUTES: ${JWT_ACCESS_MINUTES:-15}
+      JWT_REFRESH_DAYS: ${JWT_REFRESH_DAYS:-7}
+      ENABLE_DEMO_PROVIDERS: ${ENABLE_DEMO_PROVIDERS:-true}
+      CHAT_QUOTA_ENABLED: ${CHAT_QUOTA_ENABLED:-true}
+      CHAT_QUOTA_ANONYMOUS_DAILY: ${CHAT_QUOTA_ANONYMOUS_DAILY:-10}
+      CHAT_QUOTA_AUTHENTICATED_DAILY: ${CHAT_QUOTA_AUTHENTICATED_DAILY:-30}
+      CHAT_QUOTA_GLOBAL_DAILY: ${CHAT_QUOTA_GLOBAL_DAILY:-200}
+      CHAT_QUOTA_EXEMPT_SUBJECT_HASHES: ${CHAT_QUOTA_EXEMPT_SUBJECT_HASHES:-[]}
+      DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-admin.demo}
+      DEMO_STAFF_USERNAME: ${DEMO_STAFF_USERNAME:-staff.demo}
+      LLM_MODE: ${LLM_MODE:-deepseek}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    secrets:
+      - postgres_password
+      - redis_password
+      - minio_root_user
+      - minio_root_password
+      - jwt_signing_key
+      - pii_hmac_key
+      - pii_encryption_key
+      - mcp_internal_token
+      - demo_sms_code
+      - demo_provider_ack
+      - demo_admin_password
+      - demo_staff_password
+      - deepseek_api_key
+      - dashscope_api_key
+      - source: metastudio_app_key
+        target: metastudio_app_key
+        mode: 0400
+      - source: metastudio_huawei_access_key
+        target: metastudio_huawei_access_key
+        mode: 0400
+      - source: metastudio_huawei_secret_key
+        target: metastudio_huawei_secret_key
+        mode: 0400
+      - source: vision_dashscope_api_key
+        target: vision_dashscope_api_key
+        mode: 0400
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    ports:
+      - "127.0.0.1:18001:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 10s
+      start_period: 45s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    mem_limit: 1024m
+    mem_reservation: 256m
+    cpus: "1.5"
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+
+  material-worker-candidate:
+    profiles: ["candidate"]
+    image: smart-gov/material-worker:${RELEASE_TAG:?set RELEASE_TAG for the candidate}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.material-worker
+    entrypoint: ["/bin/sh", "/usr/local/bin/smartgov-secret-entrypoint", "material-worker"]
+    user: "0:0"
+    environment:
+      ENVIRONMENT: demo
+      POSTGRES_DB: ${POSTGRES_DB:-smart_gov}
+      POSTGRES_USER: ${POSTGRES_USER:-smart_gov}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MATERIAL_TEMPLATE_SOURCE_PREFIX: ${MATERIAL_TEMPLATE_SOURCE_PREFIX:-material-templates/v1}
+      MATERIAL_TEMPLATE_MANIFEST_PATH: ${MATERIAL_TEMPLATE_MANIFEST_PATH:-resources/material_templates/v1/manifest.json}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
+      GENERATED_DOCUMENTS_BUCKET: ${GENERATED_DOCUMENTS_BUCKET:-smart-gov-generated-documents}
+      MATERIAL_DOCUMENTS_ENABLED: ${MATERIAL_DOCUMENTS_ENABLED:-true}
+      MATERIAL_TEMPLATE_PROVIDER: ${MATERIAL_TEMPLATE_PROVIDER:-dashscope}
+      MATERIAL_TEMPLATE_MODEL: ${MATERIAL_TEMPLATE_MODEL:-qwen3-vl-flash-2026-01-22}
+      MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL: ${MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MATERIAL_TEMPLATE_DASHSCOPE_API_KEY_FILE: /run/secrets/vision_dashscope_api_key
+      MATERIAL_DOCUMENT_RETENTION_HOURS: ${MATERIAL_DOCUMENT_RETENTION_HOURS:-24}
+      MATERIAL_DOCUMENT_WORKER_POLL_SECONDS: ${MATERIAL_DOCUMENT_WORKER_POLL_SECONDS:-1.0}
+      MATERIAL_DOCUMENT_WORKER_LEASE_SECONDS: ${MATERIAL_DOCUMENT_WORKER_LEASE_SECONDS:-180}
+      MATERIAL_DOCUMENT_MODEL_TIMEOUT_SECONDS: ${MATERIAL_DOCUMENT_MODEL_TIMEOUT_SECONDS:-90}
+      MATERIAL_DOCUMENT_RELEASE_LANE: ${RELEASE_TAG:?set RELEASE_TAG for the candidate}
+    secrets:
+      - postgres_password
+      - minio_root_user
+      - minio_root_password
+      - source: vision_dashscope_api_key
+        target: vision_dashscope_api_key
+        mode: 0400
+    volumes:
+      - ./deploy/container-secret-entrypoint.sh:/usr/local/bin/smartgov-secret-entrypoint:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import time; p=Path('/tmp/material-worker.heartbeat'); raise SystemExit(0 if p.exists() and time.time()-p.stat().st_mtime < 30 else 1)"]
+      interval: 10s
+      start_period: 60s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      api-candidate:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 1536m
+    mem_reservation: 384m
+    cpus: "1.0"
+    pids_limit: 384
+    security_opt:
+      - no-new-privileges:true

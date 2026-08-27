@@ -72,6 +72,7 @@ def _step(order: int, code: str, title: str, actor: str, description: str, durat
 DEMO_SERVICES: Final = [
     {
         "external_item_id": 1001, "code": "DEMO-SS-CARD-001", "department": "HUMAN_RESOURCES", "window": "HRSS-CENTER-01", "applicant_type": "INDIVIDUAL",
+        "handling_mode": "BOTH", "online_status": "AVAILABLE", "status_reason": "本地演示目录",
         "title": "社会保障卡申领", "summary": "申领实体社会保障卡。所有内容均为联调演示数据，不可作为真实办事依据。",
         "form_schema": _schema([], {"applicant": {"type": "object"}}), "appointment_supported": True, "requires_appointment": False,
         "fee_required": False, "fee_cents": 0, "delivery_supported": True,
@@ -85,6 +86,7 @@ DEMO_SERVICES: Final = [
     },
     {
         "external_item_id": 1002, "code": "DEMO-ID-REISSUE-001", "department": "PUBLIC_SECURITY", "window": "POLICE-HUKOU-01", "applicant_type": "INDIVIDUAL",
+        "handling_mode": "OFFLINE_ONLY", "online_status": "UNKNOWN", "status_reason": "本地演示目录：仅窗口办理",
         "title": "居民身份证丢失补领", "summary": "办理居民身份证丢失补领。所有身份核验、缴费和结果均为模拟。",
         "form_schema": _schema([], {"verification": {"type": "object"}}), "appointment_supported": True, "requires_appointment": True,
         "requires_verification": True, "fee_required": True, "fee_cents": 4000, "delivery_supported": True,
@@ -94,6 +96,7 @@ DEMO_SERVICES: Final = [
     },
     {
         "external_item_id": 1003, "code": "DEMO-BL-REGISTER-001", "department": "MARKET_REGULATION", "window": "MARKET-CENTER-01", "applicant_type": "INDIVIDUAL",
+        "handling_mode": "BOTH", "online_status": "AVAILABLE", "status_reason": "本地演示目录",
         "title": "个体工商户设立登记", "summary": "办理个体工商户设立登记。登记结果和电子证照均为演示数据。",
         "form_schema": _schema(["business"], {"business": {"type": "object"}, "application": {"type": "object"}}), "appointment_supported": True, "requires_appointment": False,
         "fee_required": False, "fee_cents": 0, "delivery_supported": True,
@@ -103,6 +106,7 @@ DEMO_SERVICES: Final = [
     },
     {
         "external_item_id": 1004, "code": "DEMO-ENTERPRISE-SS-001", "department": "HUMAN_RESOURCES", "window": "HRSS-BUSINESS-01", "applicant_type": "ENTERPRISE",
+        "handling_mode": "ONLINE_ONLY", "online_status": "AVAILABLE", "status_reason": "本地演示目录",
         "title": "企业社会保险登记", "summary": "为企业办理社会保险登记。企业、人员和登记结果均为合成演示数据。",
         "form_schema": _schema(["business", "operator"], {"business": {"type": "object"}, "operator": {"type": "object"}}), "appointment_supported": False, "requires_appointment": False,
         "fee_required": False, "fee_cents": 0, "delivery_supported": True,
@@ -112,6 +116,7 @@ DEMO_SERVICES: Final = [
     },
     {
         "external_item_id": 1005, "code": "DEMO-LABOR-CONTRACT-001", "department": "HUMAN_RESOURCES", "window": "LABOR-SERVICE-01", "applicant_type": "ENTERPRISE",
+        "handling_mode": "BOTH", "online_status": "TEMP_UNAVAILABLE", "status_reason": "本地演示目录：模拟线上渠道临时不可用",
         "title": "劳动合同备案", "summary": "提交劳动合同备案并跟踪审核结果。合同与人员信息必须为合成演示数据。",
         "form_schema": _schema(["business", "contract"], {"business": {"type": "object"}, "contract": {"type": "object"}}), "appointment_supported": False, "requires_appointment": False,
         "fee_required": False, "fee_cents": 0, "delivery_supported": True,
@@ -121,6 +126,7 @@ DEMO_SERVICES: Final = [
     },
     {
         "external_item_id": 1006, "code": "DEMO-HOUSING-FUND-001", "department": "HOUSING_FUND", "window": "FUND-CENTER-01", "applicant_type": "ENTERPRISE",
+        "handling_mode": "BOTH", "online_status": "AVAILABLE", "status_reason": "本地演示目录",
         "title": "单位住房公积金缴存登记与演示缴付", "summary": "完成单位缴存登记并体验金额计算和模拟缴付，不连接真实公积金或银行系统。",
         "form_schema": _schema(["business", "fund"], {"business": {"type": "object"}, "fund": {"type": "object"}}), "appointment_supported": True, "requires_appointment": False,
         "fee_required": True, "fee_cents": 0, "fee_calculation": "演示缴存基数 × 演示缴存比例，仅生成模拟支付订单", "delivery_supported": True,

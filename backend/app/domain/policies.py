@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Mapping
 from uuid import UUID
@@ -563,13 +564,42 @@ class DigitalHumanIntentPolicy:
         "预约", "人脸", "核验", "审核", "认领", "驳回", "批准", "完成", "审计",
         "冻结", "解冻", "发布", "暂停", "恢复", "终止", "知识", "索引", "归档",
     )
+    SERVICE_NAVIGATION_INTENT = "OPEN_SERVICE_NAVIGATION"
+    _physical_navigation_request = re.compile(
+        r"去\s*哪(?:里)?\s*办|到\s*哪(?:里)?\s*办|在\s*哪(?:里)?\s*办|"
+        r"线下\s*(?:服务)?(?:网点|窗口)|(?:办事|服务)\s*网点|"
+        r"(?:怎么|如何|怎样)\s*去|导航"
+    )
+    _procedural_homonym = re.compile(
+        r"(?:办理|办事|申请|审批|业务)?\s*(?:流程|手续|程序|步骤)"
+        r".{0,8}(?:怎么|如何|怎样)\s*走|"
+        r"(?:怎么|如何|怎样)\s*走\s*(?:流程|手续|程序|步骤)"
+    )
+    _navigation_refusal = re.compile(
+        r"(?:不要|不用|无需|不需要|别|取消).{0,6}"
+        r"(?:导航|网点|窗口|怎么去|去哪(?:里)?办)"
+    )
+    _coordinate_or_external_target = re.compile(
+        r"坐标|经纬度?|经度|纬度|latitude|longitude|\blat\b|\blng\b|"
+        r"geo:|https?://|www\.|"
+        r"[+-]?\d{1,3}(?:\.\d+)?\s*[,，]\s*[+-]?\d{1,3}(?:\.\d+)?|"
+        r"\d{1,3}(?:\.\d+)?\s*[°º]",
+        re.IGNORECASE,
+    )
 
     def propose(
         self,
         question: str,
         role: Role | None,
         suggested_actions: list[dict[str, Any]],
+        *,
+        navigation_option: dict[str, Any] | None = None,
     ) -> DigitalHumanIntentProposal | None:
+        service_navigation = self._service_navigation(
+            question, role, suggested_actions, navigation_option
+        )
+        if service_navigation is not None:
+            return service_navigation
         if role is None and any(
             term.lower() in question.lower() for term in self._authenticated_terms
         ):
@@ -610,6 +640,73 @@ class DigitalHumanIntentPolicy:
                     prefill=self._safe_prefill("services", suggested_actions),
                 )
         return None
+
+    @classmethod
+    def _service_navigation(
+        cls,
+        question: str,
+        _role: Role | None,
+        suggested_actions: list[dict[str, Any]],
+        navigation_option: dict[str, Any] | None,
+    ) -> DigitalHumanIntentProposal | None:
+        """Create a public, grounded navigation proposal from catalogue facts.
+
+        The current ASR question controls explicit intent recognition.  The
+        option is a server-owned catalogue projection; conversation history,
+        camera output, model prose, addresses and coordinates never enter this
+        policy. When visual hints participated in the answer, callers must
+        re-resolve ``suggested_actions`` from the current spoken question alone.
+        """
+
+        if navigation_option is None or len(suggested_actions) != 1:
+            return None
+        action = suggested_actions[0]
+        if action.get("type") != "VIEW_SERVICE":
+            return None
+        try:
+            action_service_id = UUID(str(action.get("service_id", "")))
+            option_service_id = UUID(str(navigation_option.get("service_id", "")))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        if action_service_id != option_service_id:
+            return None
+        if navigation_option.get("published") is not True:
+            return None
+        if navigation_option.get("has_active_locations") is not True:
+            return None
+
+        normalized_question = unicodedata.normalize("NFKC", str(question)).strip()
+        if (
+            not normalized_question
+            or cls._procedural_homonym.search(normalized_question)
+            or cls._navigation_refusal.search(normalized_question)
+            or cls._coordinate_or_external_target.search(normalized_question)
+        ):
+            return None
+
+        handling_mode = str(navigation_option.get("handling_mode", "UNKNOWN")).upper()
+        online_status = str(navigation_option.get("online_status", "UNKNOWN")).upper()
+        explicit_request = bool(
+            cls._physical_navigation_request.search(normalized_question)
+        )
+        proactive_grounded_suggestion = (
+            handling_mode == "OFFLINE_ONLY"
+            or (
+                handling_mode == "BOTH"
+                and online_status == "TEMP_UNAVAILABLE"
+            )
+        )
+        if not explicit_request and not proactive_grounded_suggestion:
+            return None
+
+        return DigitalHumanIntentProposal(
+            intent_type=cls.SERVICE_NAVIGATION_INTENT,
+            label="前往事项服务查看线下网点",
+            section="services",
+            # The phone reloads the active locations and asks the user to
+            # choose.  A destination, coordinate or URL is never preselected.
+            prefill={"service_id": str(option_service_id)},
+        )
 
     @staticmethod
     def _safe_prefill(

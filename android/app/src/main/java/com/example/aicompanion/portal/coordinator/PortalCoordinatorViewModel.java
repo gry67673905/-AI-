@@ -49,7 +49,9 @@ public final class PortalCoordinatorViewModel extends ViewModel {
     private final Object speechLock = new Object();
 
     private volatile UserProfile user;
+    private volatile boolean sessionRestoreComplete;
     private volatile String chatSessionId = "";
+    private volatile String materialGenerationId = "";
     private long consumedSpeechSequence = -1;
 
     public PortalCoordinatorViewModel(
@@ -78,6 +80,14 @@ public final class PortalCoordinatorViewModel extends ViewModel {
     public LiveData<UiState> state() { return state; }
     public Role currentRole() { return user.getRole(); }
     public UserProfile currentUser() { return user; }
+    public boolean isSessionRestoreComplete() { return sessionRestoreComplete; }
+    public String currentChatSessionId() { return chatSessionId; }
+    public String currentMaterialGenerationId() { return materialGenerationId; }
+
+    /** Routes authenticated native-boundary failures through the same state reset as API commands. */
+    public void handleBoundaryApiFailure(String command, ApiFailure error) {
+        emitError(command == null ? "" : command, "", error);
+    }
 
     public void executeBridgeCommand(String rawEnvelope) {
         PortalCommandPolicy.Decision decision = commandPolicy.validate(rawEnvelope, currentRole());
@@ -86,6 +96,19 @@ public final class PortalCoordinatorViewModel extends ViewModel {
             return;
         }
         CommandEnvelope envelope = decision.getEnvelope();
+        if (envelope.getCommand() == Command.CHAT_SESSION_RESET) {
+            if (requestInFlight.get()) {
+                emitError(Command.CHAT_SESSION_RESET.name(), envelope.getRequestId(),
+                    new ApiFailure(409, "request_in_progress", "当前回答结束后才能新建对话"));
+                return;
+            }
+            chatSessionId = "";
+            JsonObject result = new JsonObject();
+            result.addProperty("reset", true);
+            emit("success", Command.CHAT_SESSION_RESET.name(), envelope.getRequestId(), false,
+                result, null, false);
+            return;
+        }
         execute(envelope.getCommand(), envelope.getRequestId(), envelope.getPayload(), false);
     }
 
@@ -150,6 +173,11 @@ public final class PortalCoordinatorViewModel extends ViewModel {
                     if (command == Command.AUTH_LOGIN || command == Command.AUTH_REGISTER
                         || command == Command.AUTH_LOGOUT || command == Command.AUTH_ME) {
                         user = auth.restoredProfile();
+                        if (command == Command.AUTH_LOGIN || command == Command.AUTH_REGISTER
+                            || command == Command.AUTH_LOGOUT) {
+                            materialGenerationId = "";
+                            chatSessionId = "";
+                        }
                     }
                     callback.onSuccess(value);
                 }
@@ -211,6 +239,7 @@ public final class PortalCoordinatorViewModel extends ViewModel {
         return new GatewayCallback<JsonElement>() {
             @Override public void onSuccess(JsonElement value) {
                 requestInFlight.set(false);
+                rememberMaterialGeneration(command, value);
                 emit("success", command, requestId, false, displayPolicy.sanitize(value), null, false);
             }
             @Override public void onError(ApiFailure error) {
@@ -220,16 +249,40 @@ public final class PortalCoordinatorViewModel extends ViewModel {
         };
     }
 
+    private void rememberMaterialGeneration(String command, JsonElement value) {
+        if (!Command.MATERIAL_TEMPLATE_GENERATE.name().equals(command)
+            && !Command.MATERIAL_TEMPLATE_STATUS_GET.name().equals(command)) return;
+        String id = findString(value, "generation_id");
+        if (id.isEmpty()) id = findString(value, "id");
+        if (PortalCommandPolicy.isSafeResourceId(id)) materialGenerationId = id;
+    }
+
+    private static String findString(JsonElement value, String key) {
+        if (value == null || !value.isJsonObject()) return "";
+        JsonObject object = value.getAsJsonObject();
+        JsonElement direct = object.get(key);
+        if (direct != null && direct.isJsonPrimitive() && direct.getAsJsonPrimitive().isString()) {
+            return direct.getAsString();
+        }
+        for (String nestedKey : new String[]{"data", "document"}) {
+            String nested = findString(object.get(nestedKey), key);
+            if (!nested.isEmpty()) return nested;
+        }
+        return "";
+    }
+
     private void restoreSession() {
         auth.restore(new GatewayCallback<UserProfile>() {
             @Override public void onSuccess(UserProfile profile) {
                 user = profile;
+                sessionRestoreComplete = true;
                 JsonObject payload = new JsonObject();
                 payload.addProperty("restored", profile.getRole() != Role.ANONYMOUS);
                 emit("session", "AUTH_RESTORE", "", false, payload, null, false);
             }
             @Override public void onError(ApiFailure error) {
                 user = UserProfile.anonymous();
+                sessionRestoreComplete = true;
                 emitError("AUTH_RESTORE", "", error);
             }
         });
@@ -240,7 +293,8 @@ public final class PortalCoordinatorViewModel extends ViewModel {
         JsonObject object = data.getAsJsonObject();
         JsonElement session = object.get("session_id");
         if (session != null && session.isJsonPrimitive() && session.getAsJsonPrimitive().isString()) {
-            chatSessionId = session.getAsString();
+            String candidate = session.getAsString();
+            if (PortalCommandPolicy.isSafeResourceId(candidate)) chatSessionId = candidate;
         }
         JsonElement nested = object.get("payload");
         if (nested != null && nested.isJsonObject()) rememberSession(nested);
@@ -271,7 +325,16 @@ public final class PortalCoordinatorViewModel extends ViewModel {
     }
 
     private void emitError(String command, String requestId, ApiFailure error) {
-        if (error != null && error.getStatusCode() == 401) user = auth.restoredProfile();
+        if (error != null && error.getStatusCode() == 401) {
+            try {
+                auth.clearLocalSession();
+            } catch (RuntimeException ignored) {
+                // The UI must still stop presenting an authenticated identity if secure-store cleanup fails.
+            }
+            user = UserProfile.anonymous();
+            materialGenerationId = "";
+            chatSessionId = "";
+        }
         emit("error", command, requestId, false, new JsonObject(), error, false);
     }
 

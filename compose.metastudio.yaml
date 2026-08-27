@@ -23,6 +23,21 @@ services:
       METASTUDIO_SESSION_QUOTA_ANONYMOUS_DAILY: ${METASTUDIO_SESSION_QUOTA_ANONYMOUS_DAILY:-5}
       METASTUDIO_SESSION_QUOTA_AUTHENTICATED_DAILY: ${METASTUDIO_SESSION_QUOTA_AUTHENTICATED_DAILY:-10}
       METASTUDIO_SESSION_QUOTA_GLOBAL_DAILY: ${METASTUDIO_SESSION_QUOTA_GLOBAL_DAILY:-100}
+      VISION_ENABLED: "true"
+      VISION_PROVIDER: ${VISION_PROVIDER:-dashscope}
+      VISION_DASHSCOPE_API_KEY_FILE: /run/secrets/vision_dashscope_api_key
+      VISION_DASHSCOPE_BASE_URL: ${VISION_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      VISION_DOCUMENT_TIMEOUT_SECONDS: ${VISION_DOCUMENT_TIMEOUT_SECONDS:-20}
+      VISION_FAST_PROVIDER: ${VISION_FAST_PROVIDER:-mock}
+      VISION_FAST_HTTP_URL: ${VISION_FAST_HTTP_URL:-}
+      VISION_FAST_TIMEOUT_SECONDS: ${VISION_FAST_TIMEOUT_SECONDS:-0.5}
+      VISION_FAST_MAX_CONCURRENCY: ${VISION_FAST_MAX_CONCURRENCY:-2}
+      VISION_TIMELINE_TTL_SECONDS: ${VISION_TIMELINE_TTL_SECONDS:-120}
+      VISION_TIMELINE_MAX_EVENTS: ${VISION_TIMELINE_MAX_EVENTS:-128}
+      VISION_SEALED_TURN_CAPACITY: ${VISION_SEALED_TURN_CAPACITY:-2}
+      VISION_LATE_MEMORY_TTL_SECONDS: ${VISION_LATE_MEMORY_TTL_SECONDS:-120}
+      VISION_TURN_CLOSE_WAIT_MS: ${VISION_TURN_CLOSE_WAIT_MS:-2000}
+      VISION_ANALYSIS_GLOBAL_DAILY: ${VISION_ANALYSIS_GLOBAL_DAILY:-20}
       # SIS is selected and delegated inside MetaStudio. This API never calls
       # SIS directly and therefore deliberately receives no SIS endpoint/key.
     secrets:
@@ -35,6 +50,18 @@ services:
       - source: metastudio_huawei_secret_key
         target: metastudio_huawei_secret_key
         mode: 0400
+      - source: vision_dashscope_api_key
+        target: vision_dashscope_api_key
+        mode: 0400
+
+  material-worker:
+    environment:
+      MATERIAL_TEMPLATE_PROVIDER: ${MATERIAL_TEMPLATE_PROVIDER:-dashscope}
+      MATERIAL_TEMPLATE_DASHSCOPE_API_KEY_FILE: /run/secrets/vision_dashscope_api_key
+    secrets:
+      - source: vision_dashscope_api_key
+        target: vision_dashscope_api_key
+        mode: 0400
 
 secrets:
   metastudio_app_key:
@@ -43,3 +70,5 @@ secrets:
     file: ./deploy/secrets/metastudio_huawei_access_key
   metastudio_huawei_secret_key:
     file: ./deploy/secrets/metastudio_huawei_secret_key
+  vision_dashscope_api_key:
+    file: ./deploy/secrets/vision_dashscope_api_key

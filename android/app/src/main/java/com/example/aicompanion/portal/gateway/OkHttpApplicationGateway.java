@@ -42,6 +42,16 @@ public final class OkHttpApplicationGateway implements ApplicationGateway {
                 write(NativeApiClient.Action.POST, new String[]{"applications", applicationId, "discard"}, payload, true, callback); return;
             case APPLICATION_TIMELINE:
                 read(new String[]{"applications", applicationId, "timeline"}, callback); return;
+            case MATERIAL_TEMPLATE_OPTIONS_GET:
+                read(new String[]{"applications", applicationId, "material-template-options"}, callback); return;
+            case MATERIAL_TEMPLATE_GENERATE:
+                JsonObject generation = payload.deepCopy();
+                generation.remove("application_id");
+                write(NativeApiClient.Action.POST,
+                    new String[]{"applications", applicationId, "material-documents"},
+                    generation, true, callback); return;
+            case MATERIAL_TEMPLATE_STATUS_GET:
+                read(new String[]{"material-documents", GatewayPayload.string(payload, "generation_id")}, callback); return;
             case DELIVERY_SET:
                 write(NativeApiClient.Action.POST, new String[]{"applications", applicationId, "delivery"}, payload, true, callback); return;
             case APPOINTMENT_LIST:

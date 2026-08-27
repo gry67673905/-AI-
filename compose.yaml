@@ -141,6 +141,17 @@ services:
       MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
       KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
       MAX_MATERIAL_BYTES: ${MAX_MATERIAL_BYTES:-10485760}
+      MATERIAL_DOCUMENTS_ENABLED: ${MATERIAL_DOCUMENTS_ENABLED:-true}
+      MATERIAL_TEMPLATE_SOURCE_PREFIX: ${MATERIAL_TEMPLATE_SOURCE_PREFIX:-material-templates/v1}
+      MATERIAL_TEMPLATE_MANIFEST_PATH: ${MATERIAL_TEMPLATE_MANIFEST_PATH:-resources/material_templates/v1/manifest.json}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
+      GENERATED_DOCUMENTS_BUCKET: ${GENERATED_DOCUMENTS_BUCKET:-smart-gov-generated-documents}
+      MATERIAL_DOCUMENT_RETENTION_HOURS: ${MATERIAL_DOCUMENT_RETENTION_HOURS:-24}
+      MATERIAL_DOCUMENT_USER_DAILY_LIMIT: ${MATERIAL_DOCUMENT_USER_DAILY_LIMIT:-10}
+      MATERIAL_DOCUMENT_USER_ACTIVE_LIMIT: ${MATERIAL_DOCUMENT_USER_ACTIVE_LIMIT:-2}
+      MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT: ${MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT:-20}
+      MATERIAL_DOCUMENT_GLOBAL_QUEUE_LIMIT: ${MATERIAL_DOCUMENT_GLOBAL_QUEUE_LIMIT:-50}
+      MATERIAL_DOCUMENT_RELEASE_LANE: local
       MCP_URL: ${MCP_URL:-http://mcp-server:3000/mcp}
       MCP_HEALTH_URL: ${MCP_HEALTH_URL:-http://mcp-server:3000/health}
       MOCK_GOV_API_URL: ${GOV_API_BASE_URL:-http://mock-gov-api:8080}
@@ -150,6 +161,7 @@ services:
       JWT_REFRESH_DAYS: ${JWT_REFRESH_DAYS:-7}
       PII_HMAC_KEY: ${PII_HMAC_KEY:?Run scripts/init-env.ps1 first}
       PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?Run scripts/init-env.ps1 first}
+      CHAT_QUOTA_EXEMPT_SUBJECT_HASHES: ${CHAT_QUOTA_EXEMPT_SUBJECT_HASHES:-[]}
       ENABLE_DEMO_PROVIDERS: ${ENABLE_DEMO_PROVIDERS:-true}
       DEMO_SMS_CODE: ${DEMO_SMS_CODE:-000000}
       DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-admin.demo}
@@ -158,7 +170,21 @@ services:
       DEMO_STAFF_PASSWORD: ${DEMO_STAFF_PASSWORD:?Run scripts/init-env.ps1 first}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?Run scripts/init-env.ps1 first}
       LLM_MODE: ${LLM_MODE:-deepseek}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
+      VISION_ENABLED: ${VISION_ENABLED:-true}
+      VISION_PROVIDER: ${VISION_PROVIDER:-mock}
+      VISION_DASHSCOPE_API_KEY: ${VISION_DASHSCOPE_API_KEY:-}
+      VISION_DASHSCOPE_BASE_URL: ${VISION_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      VISION_FAST_PROVIDER: ${VISION_FAST_PROVIDER:-mock}
+      VISION_FAST_HTTP_URL: ${VISION_FAST_HTTP_URL:-}
+      VISION_FAST_TIMEOUT_SECONDS: ${VISION_FAST_TIMEOUT_SECONDS:-0.5}
+      VISION_FAST_MAX_CONCURRENCY: ${VISION_FAST_MAX_CONCURRENCY:-2}
+      VISION_TIMELINE_TTL_SECONDS: ${VISION_TIMELINE_TTL_SECONDS:-120}
+      VISION_TIMELINE_MAX_EVENTS: ${VISION_TIMELINE_MAX_EVENTS:-128}
+      VISION_SEALED_TURN_CAPACITY: ${VISION_SEALED_TURN_CAPACITY:-2}
+      VISION_LATE_MEMORY_TTL_SECONDS: ${VISION_LATE_MEMORY_TTL_SECONDS:-120}
+      VISION_TURN_CLOSE_WAIT_MS: ${VISION_TURN_CLOSE_WAIT_MS:-2000}
+      VISION_ANALYSIS_GLOBAL_DAILY: ${VISION_ANALYSIS_GLOBAL_DAILY:-20}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "127.0.0.1:8000:8000"
@@ -178,6 +204,50 @@ services:
       minio:
         condition: service_healthy
       mcp-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  material-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.material-worker
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: ${DATABASE_URL}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?Run scripts/init-env.ps1 first}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Run scripts/init-env.ps1 first}
+      MATERIALS_BUCKET: ${MATERIALS_BUCKET:-smart-gov-materials}
+      KNOWLEDGE_BUCKET: ${KNOWLEDGE_BUCKET:-smart-gov-knowledge}
+      MATERIAL_TEMPLATE_SOURCE_PREFIX: ${MATERIAL_TEMPLATE_SOURCE_PREFIX:-material-templates/v1}
+      MATERIAL_TEMPLATE_MANIFEST_PATH: ${MATERIAL_TEMPLATE_MANIFEST_PATH:-resources/material_templates/v1/manifest.json}
+      MATERIAL_TEMPLATES_BUCKET: ${MATERIAL_TEMPLATES_BUCKET:-smart-gov-material-templates}
+      GENERATED_DOCUMENTS_BUCKET: ${GENERATED_DOCUMENTS_BUCKET:-smart-gov-generated-documents}
+      MATERIAL_DOCUMENTS_ENABLED: ${MATERIAL_DOCUMENTS_ENABLED:-true}
+      MATERIAL_TEMPLATE_PROVIDER: ${MATERIAL_TEMPLATE_PROVIDER:-mock}
+      MATERIAL_TEMPLATE_MODEL: ${MATERIAL_TEMPLATE_MODEL:-qwen3-vl-flash-2026-01-22}
+      MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL: ${MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MATERIAL_TEMPLATE_DASHSCOPE_API_KEY: ${MATERIAL_TEMPLATE_DASHSCOPE_API_KEY:-}
+      MATERIAL_DOCUMENT_RETENTION_HOURS: ${MATERIAL_DOCUMENT_RETENTION_HOURS:-24}
+      MATERIAL_DOCUMENT_WORKER_POLL_SECONDS: ${MATERIAL_DOCUMENT_WORKER_POLL_SECONDS:-1.0}
+      MATERIAL_DOCUMENT_WORKER_LEASE_SECONDS: ${MATERIAL_DOCUMENT_WORKER_LEASE_SECONDS:-180}
+      MATERIAL_DOCUMENT_MODEL_TIMEOUT_SECONDS: ${MATERIAL_DOCUMENT_MODEL_TIMEOUT_SECONDS:-90}
+      MATERIAL_DOCUMENT_RELEASE_LANE: local
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import time; p=Path('/tmp/material-worker.heartbeat'); raise SystemExit(0 if p.exists() and time.time()-p.stat().st_mtime < 30 else 1)"]
+      interval: 10s
+      start_period: 60s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      api:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 

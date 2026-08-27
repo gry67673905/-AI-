@@ -1,6 +1,6 @@
 # 云端演示部署、MetaStudio 与 APK 交付
 
-本文描述 `compose.cloud.yaml` 与 `deploy/` 的实际 IP-only 部署顺序。目标是单机 Linux x86_64 演示服务器，当前公网入口固定为 `https://123.249.68.176`。API 只监听 `127.0.0.1:18000`，所有事项、账号、材料、支付和办理结果仍是合成演示数据。
+本文描述 `compose.cloud.yaml` 与 `deploy/` 的实际 IP-only 部署顺序。目标是单机 Linux x86_64 演示服务器，当前公网入口固定为 `https://123.249.68.176`。规范 API 只监听 `127.0.0.1:18000`；升级验收期间允许 `api-candidate` 并行监听 `127.0.0.1:18001`。所有事项、账号、材料、支付和办理结果仍是合成演示数据。
 
 ## 部署门槛
 
@@ -51,7 +51,7 @@ sudo deploy/scripts/deploy.sh \
 sudo deploy/scripts/health-check.sh --expect-rag disabled
 ```
 
-此时 readiness 必须恰好为 7 项，迁移必须到当前 head `0006_metastudio`；MetaStudio 保持关闭不会触发供应方调用。确认一次性 embedding 费用后才运行：
+此时 readiness 必须恰好为 7 项，迁移必须到当前 head `0008_material_documents`；MetaStudio 保持关闭不会触发供应方调用。确认一次性 embedding 费用后才运行：
 
 ```bash
 sudo deploy/scripts/import-rag.sh --confirm-paid-import
@@ -71,7 +71,7 @@ sudo bash deploy/scripts/verify-metastudio-smoke.sh --skip-http
 
 缺少 SDK 固定 ZIP/CMS 证据、精确 11 项资产/integrity、真实 robotId、App/Project、IAM AK/SK、App Key，使用占位值，使用非北京四 endpoint，或把密钥直接写入 `cloud.env`，`deploy.sh` 都会在构建和容器变更前失败。SIS 只在 MetaStudio 控制台选择并授权委托，后端不配置或直连 SIS。默认关闭时不会要求这些专有资产或凭据。
 
-Nginx 只为 `POST /api/v1/integrations/metastudio/llm` 配置精确回调 location；请求体 `is_stream=true` 时仍使用同一路径返回 SSE。该 location 设置 `proxy_buffering off`，专用日志仅记录规范化 `$uri`，不会记录含 MSS_A `secret/time_stamp` 的 query 或完整请求行。切流后可运行以下零付费负向 smoke：
+Nginx 为 LLM 回调、客户端会话、视觉会话和视觉 WSS 分别配置精确 location；普通 `/api/` 不转发 WebSocket Upgrade。回调与 WSS 都关闭缓冲并使用仅记录规范化 `$uri` 的专用日志，不记录 MSS_A query、Authorization 或完整请求行。切流后可运行以下零付费负向 smoke：
 
 ```bash
 sudo bash deploy/scripts/verify-metastudio-smoke.sh \
@@ -79,7 +79,53 @@ sudo bash deploy/scripts/verify-metastudio-smoke.sh \
   --through-nginx
 ```
 
-它只发送无凭据或合成错误凭据请求并验证 400/401/503 和日志脱敏，不申请 onceCode、不启动数字人、不调用 SIS/DeepSeek。MetaStudio 启用时刻意不请求 `client-sessions`；首次真实联调必须另行确认华为云计费、授权和隐私告知。
+它只发送无凭据或合成错误凭据请求并验证 400/401/403/503、WSS Upgrade 和日志脱敏，不申请 onceCode、不启动数字人、不调用 SIS/DeepSeek。MetaStudio 启用时刻意不请求真实 `client-sessions`；首次真实联调必须另行确认华为云计费、授权和隐私告知。
+
+## 2.2 并行候选 API
+
+上传候选源码前必须运行 `backup.sh`，并额外保存当前 Nginx 配置和 `deploy/state/current-release`。随后安装独立视觉 secret，在 `cloud.env` 固定 `VISION_ENABLED=true`、`VISION_PROVIDER=dashscope`、`VISION_TURN_CLOSE_WAIT_MS=2000`、`VISION_ANALYSIS_GLOBAL_DAILY=20`，再启动候选：
+
+```bash
+sudo bash deploy/scripts/deploy-candidate.sh \
+  --release 20260825-vision-nav-v3 \
+  --public-ipv4 123.249.68.176 \
+  --https-security-group-confirmed
+```
+
+脚本只构建和启动 `api-candidate` 与无公网端口的 `material-worker-candidate`，使用同一 Compose 项目、数据库、Redis、Milvus、MinIO 和 MCP，不重建或停止规范 API/Worker。候选在 `18001` 完成迁移、live/ready、Worker 心跳、模板导入、MetaStudio 负向签名检查、视觉 WSS Upgrade 和日志静态门禁后，才允许原子切换：
+
+```bash
+sudo bash deploy/scripts/activate-ip-nginx.sh \
+  --public-ipv4 123.249.68.176 \
+  --upstream-port 18001 \
+  --confirm-cutover
+```
+
+失败时脚本自动恢复完整旧 Nginx；显式恢复可运行 `rollback-ip-nginx.sh --confirm-rollback`。候选不再需要时运行 `stop-candidate.sh`，该脚本只删除候选容器和 marker，不删除镜像、数据卷或规范 API。真机验收通过后，在 Nginx 仍指向 `18001` 时用 `deploy.sh` 发布同一 release 到 `18000`，再以 `--upstream-port 18000` 切回并停止候选。数据库迁移不降级。
+
+## 2.3 材料 DOCX Worker
+
+`cloud.env` 必须固定以下非秘密设置；上传材料、知识、模板源和生成文件四个 bucket 必须两两不同。`preflight.sh` 会在安装或发布前阻止缺失、复用或无全局日额度的配置：
+
+```text
+MATERIAL_DOCUMENTS_ENABLED=true
+MATERIAL_TEMPLATE_PROVIDER=dashscope
+MATERIAL_TEMPLATE_MODEL=qwen3-vl-flash-2026-01-22
+MATERIAL_TEMPLATE_DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MATERIAL_TEMPLATE_MANIFEST_PATH=resources/material_templates/v1/manifest.json
+MATERIALS_BUCKET=smart-gov-materials
+KNOWLEDGE_BUCKET=smart-gov-knowledge
+MATERIAL_TEMPLATES_BUCKET=smart-gov-material-templates
+GENERATED_DOCUMENTS_BUCKET=smart-gov-generated-documents
+MATERIAL_DOCUMENT_RETENTION_HOURS=24
+MATERIAL_DOCUMENT_GLOBAL_DAILY_LIMIT=20
+```
+
+Worker 镜像包含固定模板包、LibreOffice Writer、Noto CJK 字体和 Poppler，不暴露端口。启用 MetaStudio 的当前部署复用 root-only `vision_dashscope_api_key` 文件作为同一 DashScope 账号凭据；入口脚本将它复制到 Worker 私有 `/tmp` 后降权运行，密钥不进入命令参数和环境快照。Worker 每 5 秒更新私有心跳，候选/规范健康检查均要求心跳新鲜。API 创建任务时写入当前 `RELEASE_TAG`，Worker 只租赁同一发布 lane；本地 Compose 固定使用 `local`，云端不得通过 `cloud.env` 单独覆盖 lane。
+
+`backup.sh` 会镜像上传材料、知识和 `MATERIAL_TEMPLATES_BUCKET` 到备份目录，并在 manifest 中记录三类持久对象。`GENERATED_DOCUMENTS_BUCKET` 受 24 小时生命周期约束，是可重新生成的临时输出，明确不备份。
+
+上线前至少完成一份真实合成材料的 `QUEUED → RUNNING → READY → 鉴权下载`，核对 DOCX MIME、SHA-256、演示页脚和 MinIO 非公开性。真实 Qwen 请求只允许一次；超时、非法 JSON 或供应方失败必须进入 `FAILED`，不得切换 Mock、重试或调用第二模型。完整业务和 Android 保存边界见 [材料 Word 模板生成](material-document-generation.md)。
 
 ## 3. 官方 lego 与 IP 证书
 
@@ -161,6 +207,8 @@ D:\AndroidDev\gradle-8.14.5\bin\gradle.bat `
   -PgovApiBase=https://123.249.68.176
 ```
 
-debug APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。本项目只编译和运行 JVM/静态测试，不自动安装 APK、不启动 AVD、不做手机界面视觉调试。
+debug APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。默认流水线只编译和运行 JVM/静态测试；不启动 AVD，也不执行自动化界面视觉调试。
+
+本轮云端真机候选固定为 `versionCode=3`、`versionName=0.2.1-cloud-test`。只有在用户明确进入真机阶段、确认 USB 设备签名一致后，才使用 `adb install -r`；签名不一致时停止，不卸载、不清除数据。
 
 若构建 MetaStudio 版本，Android 构建还会核对 `assets/metastudio/sdk/` 内的官方 5.0.6 固定 ZIP/CMS 证据、完整 11 项相对资产和 `sdk-integrity.json`。`serverAddress`、robotId 与一次性 onceCode 只能由 `/api/v1/integrations/metastudio/client-sessions` 返回，禁止写入 BuildConfig、WebView 查询串或静态资产。启用数字人意味着华为 SDK 可能把音频/交互直接发送到华为云，必须在界面中先取得用户明确同意；Android 10 与 Android 12+ 真机 PoC 未通过前不得发布数字人 APK。

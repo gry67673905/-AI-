@@ -4,6 +4,12 @@
     const EXPECTED_SERVER = 'metastudio-api.cn-north-4.myhuaweicloud.com';
     const METASTUDIO_CLIENT = 'metastudio-client.cn-north-4.myhuaweicloud.com';
     const ID = /^[A-Za-z0-9._:-]{1,256}$/;
+    const MAX_SPEECH_TEXT_CHARS = 4096;
+    const MAX_RETIRED_CHAT_IDS = 32;
+    const PHASE = Object.freeze({
+        INACTIVE: 'inactive', LISTENING: 'listening', RECOGNIZING: 'recognizing',
+        WAITING_ANSWER: 'waiting_answer', ANSWERING: 'answering', ENDED: 'ended'
+    });
     const RTC_SUFFIXES = Object.freeze([
         '.dbankcdn.com', '.dbankcdn.cn', '.dbankcloud.ru', '.dbankcloud.cn',
         '.dbankcloud.com', '.hicloud.cn', '.hicloud.com', '.dbankedge.cn'
@@ -101,6 +107,18 @@
         '47015018', '47015019', '47015028', '47015029', '47015030', '47015031'
     ]);
     let taskCreated = false;
+    let conversationActive = false;
+    let interactionPhase = PHASE.INACTIVE;
+    const speechState = {
+        activeChatId: '',
+        isFinal: false,
+        partialReported: false,
+        retiredChatIds: new Set()
+    };
+    const captionState = {
+        activeChatId: '',
+        latestResultId: -1
+    };
 
     const nativePort = () => window.GovDigitalHumanNative;
     const post = (payload) => {
@@ -110,24 +128,126 @@
         return true;
     };
     const status = (value) => post({event: 'sdk_status', status: value});
+    const clearCaption = () => {
+        captionState.activeChatId = '';
+        captionState.latestResultId = -1;
+        const caption = document.getElementById('local-caption');
+        const text = document.getElementById('local-caption-text');
+        text.textContent = '';
+        caption.hidden = true;
+        caption.setAttribute('data-final', 'false');
+    };
+    const renderSpeechCaption = (chatId, resultId, text, isLast) => {
+        if (captionState.activeChatId !== chatId) {
+            captionState.activeChatId = chatId;
+            captionState.latestResultId = -1;
+        }
+        // ASR partial packets are revisions, not append-only fragments. Ignore
+        // a delayed partial, but always accept the provider's terminal packet.
+        if (!isLast && resultId < captionState.latestResultId) return;
+        captionState.latestResultId = Math.max(captionState.latestResultId, resultId);
+        const caption = document.getElementById('local-caption');
+        document.getElementById('local-caption-text').textContent = text;
+        caption.setAttribute('data-final', String(isLast));
+        caption.hidden = false;
+    };
     const gate = (message, state) => {
+        clearCaption();
         document.getElementById('hard-gate-message').textContent = message;
         document.getElementById('hard-gate').hidden = false;
         status(state);
     };
 
+    const retireSpeechChat = (chatId) => {
+        if (!chatId) return;
+        speechState.retiredChatIds.add(chatId);
+        while (speechState.retiredChatIds.size > MAX_RETIRED_CHAT_IDS) {
+            const oldest = speechState.retiredChatIds.values().next().value;
+            speechState.retiredChatIds.delete(oldest);
+        }
+    };
+
+    const resetCurrentSpeech = () => {
+        speechState.activeChatId = '';
+        speechState.isFinal = false;
+        speechState.partialReported = false;
+    };
+
+    const retireActiveSpeech = () => {
+        retireSpeechChat(speechState.activeChatId);
+        resetCurrentSpeech();
+    };
+
+    const clearSpeechState = () => {
+        resetCurrentSpeech();
+        speechState.retiredChatIds.clear();
+        clearCaption();
+    };
+
+    const deactivateConversation = (phase) => {
+        conversationActive = false;
+        interactionPhase = phase;
+        clearSpeechState();
+    };
+
+    const observeSpeechRecognition = (question) => {
+        if (interactionPhase === PHASE.ENDED || !question || typeof question !== 'object'
+            || Array.isArray(question)) return;
+        const chatId = question.chatId;
+        const resultId = question.resultId;
+        const isLast = question.isLast;
+        if (typeof chatId !== 'string' || !ID.test(chatId)
+            || !Number.isSafeInteger(resultId) || resultId < 0
+            || typeof isLast !== 'boolean'
+            || typeof question.text !== 'string' || question.text.length < 1
+            || question.text.length > MAX_SPEECH_TEXT_CHARS
+            || speechState.retiredChatIds.has(chatId)) return;
+
+        // Some supported System WebView / MetaStudio combinations can deliver
+        // a valid speechRecognized packet before (or without) enterActive when
+        // the activity is recreated. The schema-valid ASR packet is itself an
+        // authoritative indication that the conversation is active. Without
+        // this recovery the native vision controller never receives turn
+        // boundaries even though MetaStudio continues answering normally.
+        if (!conversationActive) {
+            conversationActive = true;
+            interactionPhase = PHASE.LISTENING;
+            clearSpeechState();
+        }
+
+        if (speechState.activeChatId && speechState.activeChatId !== chatId) {
+            retireActiveSpeech();
+        }
+        if (!speechState.activeChatId) speechState.activeChatId = chatId;
+        if (speechState.isFinal) return;
+        renderSpeechCaption(chatId, resultId, question.text, isLast);
+        speechState.isFinal = isLast;
+        if (isLast) {
+            interactionPhase = PHASE.WAITING_ANSWER;
+            status('asr_final');
+        } else if (!speechState.partialReported) {
+            speechState.partialReported = true;
+            interactionPhase = PHASE.RECOGNIZING;
+            status('asr_partial');
+        }
+    };
+
     const extractIntent = (answer) => {
-        if (!answer || answer.isLast !== true || !ID.test(String(answer.chatId || ''))) return null;
+        if (!answer || typeof answer !== 'object' || Array.isArray(answer)
+            || answer.isLast !== true || typeof answer.chatId !== 'string'
+            || !ID.test(answer.chatId)) return null;
         let extension = answer.extendParam;
         if (typeof extension === 'string') {
+            if (extension.length < 1 || extension.length > 4096) return null;
             try { extension = JSON.parse(extension); } catch (_) { return null; }
         }
         if (!extension || typeof extension !== 'object' || Array.isArray(extension)) return null;
-        const intentId = String(extension.intent_id || '');
+        const intentId = extension.intent_id;
+        if (typeof intentId !== 'string') return null;
         if (!ID.test(intentId) || extension.requires_confirmation !== true) return null;
         return {
             event: 'semantic_final',
-            chat_id: String(answer.chatId),
+            chat_id: answer.chatId,
             intent_id: intentId,
             is_last: true
         };
@@ -204,7 +324,10 @@
     };
 
     const eventListeners = Object.freeze({
-        error: (error) => status(safeSdkErrorStatus(error)),
+        error: (error) => {
+            deactivateConversation(PHASE.INACTIVE);
+            status(safeSdkErrorStatus(error));
+        },
         jobInfoChange: (job) => {
             // create() may resolve even when parameter or onceCode validation
             // fails. Only the provider's ready event with a concrete job ID is
@@ -213,9 +336,38 @@
                 status(safeWebsocketStatus(job));
             }
         },
-        enterActive: () => status('active'),
-        jobEnd: () => status('ended'),
+        enterActive: () => {
+            if (conversationActive || interactionPhase === PHASE.ENDED) return;
+            conversationActive = true;
+            interactionPhase = PHASE.LISTENING;
+            clearSpeechState();
+            status('active');
+        },
+        enterSleep: () => {
+            deactivateConversation(PHASE.INACTIVE);
+            status('ready');
+        },
+        jobEnd: () => {
+            deactivateConversation(PHASE.ENDED);
+            status('ended');
+        },
+        speechRecognized: (question) => observeSpeechRecognition(question),
+        speakingStart: () => {
+            if (!conversationActive) return;
+            retireActiveSpeech();
+            interactionPhase = PHASE.ANSWERING;
+            status('answering');
+        },
+        speakingStop: () => {
+            // During VAD interruption the stop event may race with the new
+            // partial ASR event. Never overwrite an in-progress ASR status.
+            if (conversationActive && interactionPhase === PHASE.ANSWERING) {
+                interactionPhase = PHASE.LISTENING;
+                status('active');
+            }
+        },
         semanticRecognized: (answer) => {
+            if (!conversationActive) return;
             const intent = extractIntent(answer);
             if (intent) post(intent);
         }
@@ -245,7 +397,15 @@
             // short-lived server-side session; no JWT or account data enters
             // the WebView or Huawei callback payload.
             extendParamStr: JSON.stringify({client_id: String(session.session_id)}),
-            config: {enableCaption: true, enableChatBtn: true},
+            config: {
+                enableCaption: true,
+                enableChatBtn: true,
+                // Keep the microphone track alive after the first explicit
+                // user start. Leaving the Activity still destroys the task.
+                enableCollectAudioDemand: false,
+                // Permit a new voice turn to interrupt digital-human speech.
+                enableVadInterrupt: true
+            },
             eventListeners
         };
         session.once_code = '';
@@ -312,6 +472,7 @@
     };
 
     window.addEventListener('pagehide', () => {
+        deactivateConversation(PHASE.ENDED);
         if (taskCreated && window.HwICSUiSdk && typeof window.HwICSUiSdk.destroy === 'function') {
             try { void window.HwICSUiSdk.destroy(); } catch (_) { /* no secret or error forwarding */ }
         }

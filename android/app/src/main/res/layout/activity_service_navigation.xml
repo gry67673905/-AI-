@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/surface"
+        android:orientation="vertical"
+        android:padding="14dp">
+
+        <TextView
+            android:id="@+id/navigationServiceTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="正在读取事项导航信息…"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/navigationStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="定位仅在此页面前台使用，不上传到项目服务端。"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/navigationDemoNotice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#FFFFE8B0"
+            android:padding="8dp"
+            android:text="DEMO：当前网点或路线数据仅用于演示。"
+            android:textColor="#7A4B00"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <com.huawei.hms.maps.MapView
+        android:id="@+id/navigationMapView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:contentDescription="服务网点与路线预览地图" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@color/surface"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <Button
+                android:id="@+id/navigationReloadOptions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="重新加载服务网点" />
+
+            <Button
+                android:id="@+id/navigationEnableLocation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="启用本页前台定位" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="附近服务网点（最多 3 个，本机排序）"
+                android:textColor="@color/text_primary"
+                android:textStyle="bold" />
+
+            <RadioGroup
+                android:id="@+id/navigationWindows"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+            <RadioGroup
+                android:id="@+id/navigationTravelMode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/navigationDriving"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="驾车" />
+
+                <RadioButton
+                    android:id="@+id/navigationWalking"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:checked="true"
+                    android:text="步行" />
+            </RadioGroup>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/navigationPreviewRoute"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="路线预览" />
+
+                <Button
+                    android:id="@+id/navigationStart"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:text="开始导航" />
+
+                <Button
+                    android:id="@+id/navigationStop"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:text="结束导航" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="定位与演示网点均按 GCJ02 坐标语义使用。路线请求会发送起终点给华为 Navi Kit；项目后端只接收事项编号且不接收当前位置。离开本页即停止定位和语音导航。"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

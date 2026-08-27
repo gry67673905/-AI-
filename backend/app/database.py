@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from dataclasses import asdict
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import func, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -14,11 +14,17 @@ from app.errors import (
     ConflictError,
     DatabaseUnavailable,
     PermissionDenied,
+    ResourceNotFound,
     ServiceError,
 )
 from app.knowledge import content_hash
 from app.models import ChatMessage, ChatSession, KnowledgeDocument, ToolAudit
-from app.application.dtos import SourceData, ToolCallData
+from app.application.dtos import (
+    ChatUiCardData,
+    ConversationMessageData,
+    SourceData,
+    ToolCallData,
+)
 from app.security import redact_sensitive
 
 
@@ -73,7 +79,8 @@ class Database:
         request_id: UUID,
         message: str,
         owner_account_id: UUID | None = None,
-    ) -> None:
+    ) -> UUID:
+        message_id = uuid4()
         try:
             async with self.sessions.begin() as session:
                 # SELECT ... FOR UPDATE cannot lock a row that does not yet
@@ -116,6 +123,7 @@ class Database:
                     chat_session.updated_at = datetime.now(timezone.utc)
                 session.add(
                     ChatMessage(
+                        id=message_id,
                         session_id=session_id,
                         request_id=request_id,
                         role="user",
@@ -123,6 +131,7 @@ class Database:
                         extra={},
                     )
                 )
+            return message_id
         except ServiceError:
             raise
         except Exception as exc:
@@ -137,7 +146,9 @@ class Database:
         tool_calls: list[ToolCallData],
         cache_hit: bool,
         warnings: list[str],
-    ) -> None:
+        ui_cards: list[ChatUiCardData] | None = None,
+    ) -> UUID:
+        message_id = uuid4()
         try:
             async with self.sessions.begin() as session:
                 chat_session = await session.get(ChatSession, session_id)
@@ -146,6 +157,7 @@ class Database:
                 chat_session.updated_at = datetime.now(timezone.utc)
                 session.add(
                     ChatMessage(
+                        id=message_id,
                         session_id=session_id,
                         request_id=request_id,
                         role="assistant",
@@ -154,6 +166,9 @@ class Database:
                             "sources": [asdict(source) for source in sources],
                             "cache_hit": cache_hit,
                             "warnings": warnings,
+                            "ui_cards": [
+                                self._card_payload(card) for card in (ui_cards or [])
+                            ],
                         },
                     )
                 )
@@ -174,7 +189,155 @@ class Database:
                             error=redact_sensitive(call.error),
                         )
                     )
+            return message_id
         except DatabaseUnavailable:
             raise
         except Exception as exc:
             raise DatabaseUnavailable(request_id) from exc
+
+    async def load_recent_history(
+        self,
+        session_id: UUID,
+        owner_account_id: UUID | None,
+        limit: int = 8,
+    ) -> tuple[ConversationMessageData, ...]:
+        """Load prior server messages after enforcing the session owner boundary."""
+
+        bounded = max(1, min(int(limit), 8))
+        try:
+            async with self.sessions() as session:
+                chat = await session.get(ChatSession, session_id)
+                if chat is None:
+                    return ()
+                self._require_history_owner(chat, owner_account_id)
+                rows = list(
+                    (
+                        await session.scalars(
+                            select(ChatMessage)
+                            .where(ChatMessage.session_id == session_id)
+                            .order_by(
+                                ChatMessage.created_at.desc(), ChatMessage.id.desc()
+                            )
+                            .limit(bounded)
+                        )
+                    ).all()
+                )
+                rows.reverse()
+                return tuple(
+                    ConversationMessageData(
+                        role="human" if row.role == "user" else "ai",
+                        content=row.content,
+                        ui_cards=tuple(
+                            redact_sensitive(
+                                (row.extra or {}).get("ui_cards", [])
+                            )
+                            if row.role == "assistant"
+                            and isinstance(row.extra, dict)
+                            and isinstance(row.extra.get("ui_cards", []), list)
+                            else ()
+                        ),
+                    )
+                    for row in rows
+                    if row.role in {"user", "assistant"}
+                )
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise DatabaseUnavailable() from exc
+
+    async def list_messages_authorized(
+        self,
+        session_id: UUID,
+        owner_account_id: UUID,
+        *,
+        before: UUID | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return one owner-only history page without exposing tool audit data."""
+
+        bounded = max(1, min(int(limit), 100))
+        try:
+            async with self.sessions() as session:
+                chat = await session.get(ChatSession, session_id)
+                if chat is None or chat.owner_account_id != owner_account_id:
+                    raise ResourceNotFound("咨询会话")
+                statement = select(ChatMessage).where(
+                    ChatMessage.session_id == session_id
+                )
+                if before is not None:
+                    cursor = await session.get(ChatMessage, before)
+                    if cursor is None or cursor.session_id != session_id:
+                        raise ResourceNotFound("咨询消息")
+                    statement = statement.where(
+                        or_(
+                            ChatMessage.created_at < cursor.created_at,
+                            and_(
+                                ChatMessage.created_at == cursor.created_at,
+                                ChatMessage.id < cursor.id,
+                            ),
+                        )
+                    )
+                rows = list(
+                    (
+                        await session.scalars(
+                            statement.order_by(
+                                ChatMessage.created_at.desc(), ChatMessage.id.desc()
+                            ).limit(bounded + 1)
+                        )
+                    ).all()
+                )
+                has_more = len(rows) > bounded
+                page = rows[:bounded]
+                next_before = page[-1].id if has_more and page else None
+                page.reverse()
+                items = []
+                for row in page:
+                    extra = row.extra if isinstance(row.extra, dict) else {}
+                    cards = extra.get("ui_cards", [])
+                    if not isinstance(cards, list):
+                        cards = []
+                    items.append(
+                        {
+                            "id": row.id,
+                            "request_id": row.request_id,
+                            "role": row.role,
+                            "content": row.content,
+                            "ui_cards": redact_sensitive(cards),
+                            "created_at": row.created_at,
+                        }
+                    )
+                return {
+                    "session_id": session_id,
+                    "items": items,
+                    "next_before": next_before,
+                    "has_more": has_more,
+                }
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise DatabaseUnavailable() from exc
+
+    @staticmethod
+    def _require_history_owner(
+        chat: ChatSession, owner_account_id: UUID | None
+    ) -> None:
+        if chat.owner_account_id is not None:
+            if owner_account_id is None:
+                raise AuthenticationRequired("该咨询会话已归属账号，请先登录")
+            if chat.owner_account_id != owner_account_id:
+                raise PermissionDenied("咨询会话不属于当前账号")
+        elif owner_account_id is not None:
+            raise ConflictError(
+                "旧匿名咨询不能自动归属账号，请新建登录会话",
+                "anonymous_session_not_claimable",
+            )
+
+    @staticmethod
+    def _card_payload(card: ChatUiCardData) -> dict[str, Any]:
+        payload = asdict(card)
+        for key in ("intent_id", "generation_id"):
+            if payload.get(key) is not None:
+                payload[key] = str(payload[key])
+        if payload.get("expires_at") is not None:
+            payload["expires_at"] = payload["expires_at"].isoformat()
+        return redact_sensitive(payload)

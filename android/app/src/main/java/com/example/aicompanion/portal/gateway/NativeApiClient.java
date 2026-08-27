@@ -214,7 +214,10 @@ public final class NativeApiClient {
                 try (ResponseBody body = response.body()) {
                     String raw = body == null ? "" : body.string();
                     if (!response.isSuccessful()) {
-                        if (response.code() == 401) sessionStore.clear();
+                        // A 401 can mean only that this request raced with an access-token
+                        // refresh in another native process. Session invalidation belongs to
+                        // OkHttpAuthGateway, which can refresh first and compare the current
+                        // refresh token before clearing anything.
                         callback.onError(parseFailure(response.code(), raw));
                         return;
                     }

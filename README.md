@@ -16,7 +16,7 @@
 | `compose.cloud.yaml`、`compose.metastudio.yaml`、`deploy/` | 云端演示 Compose、可选 MetaStudio 覆盖、Docker secrets、HTTPS、备份/回滚和显式付费 RAG 导入脚本 |
 | `scripts/` | 环境初始化、启动、迁移、业务验收、AI 验收、日志、测试和非破坏性停止 |
 
-设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md)、[API 示例](docs/api-examples.md)、[MetaStudio 接入说明](docs/metastudio-integration.md) 和 [云端部署手册](docs/cloud-deployment.md)。
+设计说明见 [架构文档](docs/architecture.md)、[业务与领域设计](docs/business-design.md)、[角色权限矩阵](docs/role-permissions.md)、[API 示例](docs/api-examples.md)、[材料 Word 模板生成](docs/material-document-generation.md)、[MetaStudio 接入说明](docs/metastudio-integration.md)、[Navi Kit 导航说明](docs/navigation-integration.md) 和 [云端部署手册](docs/cloud-deployment.md)。
 
 ## 前置条件
 
@@ -44,7 +44,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health/ready | ConvertTo-Json -Depth 10
 .\scripts\logs.ps1
 ```
 
-API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；当前 OpenAPI 共 76 个 method/path。默认本地栈未启用团队 RAG，`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。云端启用固定团队数据集后新增 `rag_corpus`，共 8 项，并校验激活别名准确指向 15,858 条内容向量和 1,012 条文档路由向量。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`，其他本地依赖默认仅在 Compose 网络中可达。
+API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；当前 OpenAPI 共 83 个操作、76 个路径。默认本地栈未启用团队 RAG，`/health/ready` 检查 PostgreSQL、Redis、Milvus、MCP、Mock API、MinIO 和业务种子共 7 项。云端启用固定团队数据集后新增 `rag_corpus`，共 8 项，并校验激活别名准确指向 15,858 条内容向量和 1,012 条文档路由向量。PostgreSQL 宿主调试端口为 `127.0.0.1:15432`，其他本地依赖默认仅在 Compose 网络中可达。
 
 ## 演示账号
 
@@ -64,11 +64,13 @@ API 文档在本地栈启动后可访问 `http://127.0.0.1:8000/docs`；当前 O
 
 - 受限 JSON 规则资格预检和 JSON Schema 动态表单；
 - 必需、条件必需、可选材料，PDF/JPEG/PNG 单文件不超过 10 MB；
+- 办件级可填写 DOCX 异步生成：模型只提取白名单字段，正文与 OOXML 由受控渲染器生成，私有文件 24 小时过期；
 - MinIO 私有材料、SHA-256 完整性、`NOT_SCANNED_DEMO` 明示状态；
 - 乐观锁版本与 `Idempotency-Key`；
 - 部门内工作人员认领、补正、驳回、批准和办结；
 - 本地模拟预约、身份核验、缴费失败/重试/取消与邮寄推进/取消；
-- 公开事项 AI 咨询、`local_catalog + MCP + RAG` 三类溯源、SSE、反馈与转人工取消/解决；RAG 可融合本地知识与经净化、版本化导入的团队语料；
+- 公开事项 AI 咨询、持久化多轮会话、SSE 消息气泡、受控材料模板卡、反馈与转人工取消/解决；`local_catalog + MCP + RAG` 三类溯源中 MCP 始终只读，RAG 可融合本地知识与经净化、版本化导入的团队语料；
+- 事项—网点多对多目录、UTF-8 CSV 预校验/原子导入，以及仅在手机内使用当前位置排序的 Navi Kit 步行/驾车本地 PoC；
 - 管理员部门/窗口/人员、事项版本生命周期、知识索引恢复/重试/归档、审计和指标。
 
 LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或事项状态。私人身份、表单、材料和办件数据不会进入公共 Redis 检索缓存或 LLM 上下文。
@@ -108,20 +110,23 @@ LLM 只解释和建议，不能直接更改办件、审批、缴费、账号或�
 .\scripts\migrate.ps1
 ```
 
-启动时 API 也会执行 `alembic upgrade head`。当前 head 为 `0006_metastudio`：`0005_rag_corpus` 增加版本化团队语料、分块检查点与 embedding 缓存，`0006_metastudio` 只增加短期数字人动作意图表；迁移保留 `0001_initial` 的匿名聊天，脚本不会 downgrade、删表或删除数据卷。
+启动时 API 也会执行 `alembic upgrade head`。当前 head 为 `0009_consultation_materials`：`0005_rag_corpus` 增加版本化团队语料，`0006_metastudio` 增加短期数字人动作意图，`0007_navigation_catalog` 增加导航目录，`0008_material_documents` 增加材料模板目录、异步任务、租约与 24 小时到期索引，`0009_consultation_materials` 增加会话模板意图和不绑定办件的空白模板任务；迁移保留 `0001_initial` 的匿名聊天，脚本不会 downgrade、删表或删除数据卷。
 
 ## 主要 API
 
 | 分组 | 说明 | 认证 |
 | --- | --- | --- |
 | `GET /health/live`、`GET /health/ready` | 进程存活与全栈依赖就绪 | 否 |
-| `POST /api/v1/chat`、`POST /api/v1/chat/stream` | 普通/SSE 咨询；可带 `service_id`，私人办件查询还可带 `application_id` | 公开事项可匿名 |
+| `POST /api/v1/chat`、`POST /api/v1/chat/stream` | 普通/SSE 多轮咨询；流完成事件可返回受控材料卡，可带 `service_id`，私人办件查询还可带 `application_id` | 公开事项可匿名 |
+| `GET /api/v1/services/{service_id}/navigation-options` | 已发布事项的活动 GCJ02 网点与线上/线下状态；不接收用户位置 | 匿名 |
 | `/api/v1/auth/*` | 演示验证码、个人/企业注册、登录、刷新、登出、当前账号 | 按接口 |
 | `/api/v1/services/*` | 事项、资格、材料、流程、表单、窗口 | 公开 |
 | `/api/v1/applications/*` | 草稿、表单、材料、提交、补正、撤回、丢弃、时间线、邮寄 | 群众；授权人员可读 |
-| `/api/v1/consultations/*` | 历史、反馈、转人工、消息和发起人取消 | 登录 |
+| `/api/v1/applications/{id}/material-template-options`、`/material-documents` | 办件可生成模板、异步生成、状态与私有 DOCX 下载 | 办件所属群众 |
+| `/api/v1/consultations/*` | 历史、消息恢复、材料意图确认、反馈、转人工和发起人取消 | 登录 |
 | `/api/v1/staff/*` | 待办、认领、审核、办结和人工咨询 | 工作人员 |
 | `/api/v1/admin/*` | 组织、人员、账号、事项版本、知识上传/重试/归档、审计、指标 | 管理员 |
+| `POST /api/v1/admin/navigation-catalog/import` | UTF-8 CSV 导航目录 dry-run 与整文件原子导入 | 管理员 |
 | `/api/v1/appointments/*`、`/payments/*`、`/verifications/*`、`/deliveries/*` | 预约与本地模拟能力；群众可取消未终结支付/邮寄，到场和配送由所属部门人员推进 | 按操作 |
 
 所有提交、审核、预约、缴费等写操作都使用唯一 `Idempotency-Key`；并发编辑以响应中的 `version` 为准，版本或状态冲突返回 409。统一错误语义和请求示例见 [API 示例](docs/api-examples.md)。
@@ -135,7 +140,9 @@ D:\AndroidDev\gradle-8.14.5\bin\gradle.bat :app:lintDebug :app:testDebugUnitTest
 
 当前 debug/release 构建都默认连接 `https://123.249.68.176`，且网络安全配置拒绝明文 HTTP。可用 `-PgovApiBase=https://<域名或IP>` 覆盖，但必须是无用户名、路径、查询和片段的 HTTPS origin，否则构建立即失败。debug APK 生成于 `android/app/build/outputs/apk/debug/app-debug.apk`；本项目只编译和测试，不自动安装 APK、不启动 AVD。
 
-WebView 只加载受信任的本地资产。JS Bridge 仅暴露校验后的命令封包、材料选择、语音开始/停止和窗口地图；HTTP 与 Token 均由原生网关处理。Token 使用 Android Keystore 加密存储，不进入 WebView、日志或明文 SharedPreferences。HMS 地图只接受后端校验后的 `window_id`。
+WebView 只加载受信任的本地资产。JS Bridge 仅暴露校验后的命令封包、材料选择、语音开始/停止、`openServiceNavigation(service_id)` 和 `saveGeneratedDocument(generation_id)`；HTTP、Token、DOCX 下载和完整性校验均由原生网关处理。Token 使用 Android Keystore 加密存储，不进入 WebView、日志或明文 SharedPreferences。原生页重新获取活动网点；WebView、数字人和模型都不能传入坐标、URL、包名或任意 Intent。Location Kit 只在用户点击后于前台运行，当前位置不上传项目后端。
+
+Navi Kit `6.13.0.300` 仅在用户点击路线预览后延迟初始化，默认步行并可切换驾车；路线成功后才允许启动应用内逐向 TTS 导航。当前目录和 APK 均为本地 PoC，真机完成算路、语音、偏航重算、匿名确认跳转与权限验收前不得发布。详见 [Navi Kit 导航说明](docs/navigation-integration.md)。
 
 沿用的 AG Connect 身份和包名为 `com.example.aicompanion`，因此 APK 会被 Android 视作旧应用的同一包，本阶段只验证构建。
 

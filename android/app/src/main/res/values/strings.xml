@@ -4,4 +4,17 @@
     <string name="digital_human_unsupported">数字人（设备不支持）</string>
     <string name="digital_human_preparing">正在准备安全数字人会话…</string>
     <string name="digital_human_close">关闭</string>
+    <string name="digital_human_vision_enable">开启视觉</string>
+    <string name="digital_human_vision_disable">关闭视觉</string>
+    <string name="digital_human_camera_switch">切换</string>
+    <string name="digital_human_document_recognize">识别文件</string>
+    <string name="digital_human_document_capture">拍照识别</string>
+    <string name="digital_human_document_cancel">取消</string>
+    <string name="digital_human_document_guide">请把文件放平、居中并完整放入框内，尽量避免反光</string>
+    <string name="digital_human_vision_preview">视觉辅助摄像头预览</string>
+    <string name="digital_human_vision_notice_title">开启视觉辅助</string>
+    <string name="digital_human_vision_notice_message">画面将用于数字人视觉理解，请确保镜头内人员知情。</string>
+    <string name="digital_human_vision_notice_continue">继续开启</string>
+    <string name="digital_human_vision_notice_cancel">取消</string>
+    <string name="service_navigation_title">事项服务导航</string>
 </resources>

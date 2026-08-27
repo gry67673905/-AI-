@@ -5,7 +5,9 @@ import io
 from urllib.parse import urlparse
 
 from minio import Minio
+from minio.commonconfig import Filter
 from minio.error import S3Error
+from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
 
 from app.errors import ConflictError, DependencyUnavailable
 
@@ -18,6 +20,8 @@ class MinioObjectStore:
         secret_key: str,
         materials_bucket: str,
         knowledge_bucket: str,
+        material_templates_bucket: str | None = None,
+        generated_documents_bucket: str | None = None,
     ) -> None:
         parsed = urlparse(endpoint if "://" in endpoint else f"http://{endpoint}")
         self._client = Minio(
@@ -28,10 +32,25 @@ class MinioObjectStore:
         )
         self.materials_bucket = materials_bucket
         self.knowledge_bucket = knowledge_bucket
+        self.material_templates_bucket = material_templates_bucket or materials_bucket
+        self.generated_documents_bucket = (
+            generated_documents_bucket or materials_bucket
+        )
 
     async def ensure_buckets(self) -> None:
         def ensure() -> None:
-            for bucket in (self.materials_bucket, self.knowledge_bucket):
+            for bucket in dict.fromkeys(
+                (
+                    self.materials_bucket,
+                    self.knowledge_bucket,
+                    getattr(
+                        self, "material_templates_bucket", self.materials_bucket
+                    ),
+                    getattr(
+                        self, "generated_documents_bucket", self.materials_bucket
+                    ),
+                )
+            ):
                 if not self._client.bucket_exists(bucket):
                     try:
                         self._client.make_bucket(bucket)
@@ -47,6 +66,29 @@ class MinioObjectStore:
                             "BucketAlreadyExists",
                         } or not self._client.bucket_exists(bucket):
                             raise
+            generated_bucket = getattr(
+                self, "generated_documents_bucket", None
+            )
+            set_lifecycle = getattr(
+                self._client, "set_bucket_lifecycle", None
+            )
+            if generated_bucket and callable(set_lifecycle):
+                # This bucket contains only disposable generated DOCX files.
+                # Database/worker expiry remains authoritative for API state;
+                # the bucket rule is a final orphan-cleanup safety net.
+                set_lifecycle(
+                    generated_bucket,
+                    LifecycleConfig(
+                        [
+                            Rule(
+                                "Enabled",
+                                rule_filter=Filter(prefix=""),
+                                rule_id="generated-documents-expire-1d",
+                                expiration=Expiration(days=1),
+                            )
+                        ]
+                    ),
+                )
 
         try:
             await asyncio.to_thread(ensure)
@@ -110,6 +152,8 @@ class InMemoryObjectStore:
         self.objects: dict[tuple[str, str], tuple[bytes, str]] = {}
         self.materials_bucket = "materials"
         self.knowledge_bucket = "knowledge"
+        self.material_templates_bucket = "material-templates"
+        self.generated_documents_bucket = "generated-documents"
 
     async def ensure_buckets(self) -> None:
         return None

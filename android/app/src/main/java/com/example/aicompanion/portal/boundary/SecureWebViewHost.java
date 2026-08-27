@@ -41,6 +41,10 @@ public final class SecureWebViewHost {
         settings.setBlockNetworkLoads(true);
         settings.setSaveFormData(false);
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        // The portal is entirely APK-bundled and has no useful browser cache.
+        // Purge stale subresources retained across install-r upgrades without
+        // touching encrypted native login state or the isolated MetaStudio data.
+        webView.clearCache(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) settings.setSafeBrowsingEnabled(true);
 
         CookieManager cookies = CookieManager.getInstance();

@@ -1,0 +1,53 @@
+FROM python:3.13.7-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/tmp/material-worker-home
+
+WORKDIR /app
+
+# Port 80 to the Debian CDN is unreliable on some mainland networks; use the
+# same official repositories over TLS before resolving packages.
+RUN set -eux; \
+    find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) \
+        -exec sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' {} +; \
+    installed=0; \
+    for attempt in 1 2 3; do \
+        if apt-get \
+                -o Acquire::Retries=5 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 \
+                update \
+            && DEBIAN_FRONTEND=noninteractive apt-get \
+                -o Acquire::Retries=5 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 \
+                install --yes --no-install-recommends \
+                    fonts-noto-cjk \
+                    libreoffice-writer \
+                    poppler-utils; then \
+            installed=1; \
+            break; \
+        fi; \
+        rm -rf /var/lib/apt/lists/*; \
+        sleep "$((attempt * 5))"; \
+    done; \
+    test "$installed" = 1; \
+    command -v soffice; \
+    command -v pdftoppm; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.material-worker.txt ./
+RUN pip install --no-cache-dir --requirement requirements.material-worker.txt \
+    && addgroup --system app \
+    && adduser --system --ingroup app app
+
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY app ./app
+COPY resources ./resources
+
+USER app
+
+CMD ["python", "-m", "app.ops.material_document_worker"]

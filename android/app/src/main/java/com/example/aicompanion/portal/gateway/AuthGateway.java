@@ -9,4 +9,5 @@ public interface AuthGateway {
     UserProfile restoredProfile();
     void restore(GatewayCallback<UserProfile> callback);
     void execute(Command command, JsonObject payload, GatewayCallback<JsonElement> callback);
+    void clearLocalSession();
 }

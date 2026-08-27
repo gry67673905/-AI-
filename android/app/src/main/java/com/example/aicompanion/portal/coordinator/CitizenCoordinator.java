@@ -19,7 +19,8 @@ public final class CitizenCoordinator {
         Command.MATERIALS_GET, Command.PROCESS_GET, Command.FORM_SCHEMA_GET, Command.WINDOW_LIST
     );
     private static final EnumSet<Command> CONSULTATIONS = EnumSet.of(
-        Command.CONSULTATION_HISTORY, Command.CONSULTATION_FEEDBACK,
+        Command.CONSULTATION_HISTORY, Command.CONSULTATION_MESSAGES,
+        Command.CONSULTATION_MATERIAL_CONFIRM, Command.CONSULTATION_FEEDBACK,
         Command.HANDOFF_CREATE, Command.HANDOFF_MESSAGES, Command.HANDOFF_MESSAGE_ADD,
         Command.HANDOFF_CANCEL
     );

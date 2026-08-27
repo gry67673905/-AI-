@@ -19,6 +19,9 @@ from app.application.coordinators import (
     VerificationCoordinator,
 )
 from app.application.metastudio import MetaStudioCoordinator
+from app.application.navigation import NavigationCatalogCoordinator
+from app.application.vision import VisionCoordinator
+from app.application.material_documents import MaterialDocumentCoordinator
 from app.application.ports import (
     ChatModelPort,
     ChatPersistencePort,
@@ -42,7 +45,23 @@ from app.infrastructure.metastudio import (
     HuaweiMetaStudioOnceCodeAdapter,
     MetaStudioCallbackAuthenticator,
     RedisMetaStudioSessionAdapter,
-    secret_value,
+)
+from app.infrastructure.secrets import secret_value
+from app.infrastructure.vision import (
+    DashScopeVisionAnalyzer,
+    HttpVisionEventAnalyzer,
+    InMemoryVisionFrameStore,
+    MockVisionAnalyzer,
+    MockVisionEventAnalyzer,
+    RedisVisionAnalysisQuota,
+    RedisVisionTicketAdapter,
+)
+from app.infrastructure.material_documents import (
+    MaterialTemplatePack,
+    MockMaterialTemplateAnalyzer,
+)
+from app.infrastructure.material_template_catalog import (
+    immutable_material_template_objects,
 )
 
 
@@ -79,6 +98,7 @@ class BusinessRuntime:
         self.settings = settings
         self._startup_lock = asyncio.Lock()
         self._startup_complete = False
+        self._vision_cleanup_task: asyncio.Task[None] | None = None
         self._seed_password_hashes: tuple[str, str] | None = None
         self.repository = BusinessRepository(sessions)
         self.object_store = MinioObjectStore(
@@ -87,6 +107,18 @@ class BusinessRuntime:
             settings.minio_secret_key.get_secret_value(),
             settings.materials_bucket,
             settings.knowledge_bucket,
+            settings.material_templates_bucket,
+            settings.generated_documents_bucket,
+        )
+        self._packed_material_templates = (
+            immutable_material_template_objects(
+                MaterialTemplatePack(
+                    settings.material_template_manifest_path,
+                    settings.material_template_source_prefix,
+                ).load()
+            )
+            if settings.material_documents_enabled
+            else ()
         )
         self.sms = DemoSmsProvider(enabled, settings.demo_sms_code.get_secret_value())
         self.payment_provider = DemoPaymentProvider(enabled)
@@ -107,6 +139,7 @@ class BusinessRuntime:
         )
         self.idempotency = IdempotencyCoordinator(self.repository)
         self.catalog = CatalogCoordinator(self.repository)
+        self.navigation = NavigationCatalogCoordinator(self.repository)
         self.consultations = ConsultationCoordinator(
             self.repository,
             persistence,
@@ -117,6 +150,45 @@ class BusinessRuntime:
             self.security,
         )
         self.metastudio_sessions = RedisMetaStudioSessionAdapter(settings.redis_url)
+        self.vision_tickets = RedisVisionTicketAdapter(settings.redis_url)
+        self.vision_frames = InMemoryVisionFrameStore(
+            ttl_seconds=settings.vision_frame_ttl_seconds,
+            max_sessions=settings.vision_max_sessions,
+            max_frames_per_session=settings.vision_max_frames_per_session,
+            max_total_bytes=settings.vision_max_total_bytes,
+            min_frame_interval_ms=settings.vision_min_frame_interval_ms,
+            sealed_turn_capacity=settings.vision_sealed_turn_capacity,
+            timeline_ttl_seconds=settings.vision_timeline_ttl_seconds,
+            max_timeline_events=settings.vision_timeline_max_events,
+        )
+        if settings.vision_fast_provider == "http":
+            if not settings.vision_fast_http_url:
+                raise RuntimeError(
+                    "VISION_FAST_HTTP_URL is required for VISION_FAST_PROVIDER=http"
+                )
+            self.vision_fast_analyzer = HttpVisionEventAnalyzer(
+                settings.vision_fast_http_url,
+                timeout_seconds=settings.vision_fast_timeout_seconds,
+            )
+        else:
+            self.vision_fast_analyzer = MockVisionEventAnalyzer()
+        if settings.vision_provider == "dashscope":
+            self.vision_analysis_quota = RedisVisionAnalysisQuota(
+                settings.redis_url,
+                daily_limit=settings.vision_analysis_global_daily,
+            )
+            self.vision_analyzer = DashScopeVisionAnalyzer(
+                secret_value(
+                    settings.vision_dashscope_api_key,
+                    settings.vision_dashscope_api_key_file,
+                ),
+                quota=self.vision_analysis_quota,
+                base_url=settings.vision_dashscope_base_url,
+                document_timeout_seconds=settings.vision_document_timeout_seconds,
+            )
+        else:
+            self.vision_analysis_quota = None
+            self.vision_analyzer = MockVisionAnalyzer()
         self.metastudio_once_codes = HuaweiMetaStudioOnceCodeAdapter(
             enabled=settings.metastudio_enabled,
             endpoint=settings.metastudio_once_code_endpoint,
@@ -151,13 +223,51 @@ class BusinessRuntime:
             server_address=settings.metastudio_server_address,
             context_ttl_seconds=settings.metastudio_context_ttl_seconds,
             action_intent_ttl_seconds=settings.metastudio_action_intent_ttl_seconds,
+            vision=None,
         )
+        # The vision ticket is meaningful only while the owning MetaStudio
+        # client session is live.  Compose the two coordinators in this order
+        # so there is one authoritative owner/role/token-version check before
+        # a short-lived camera ticket can be minted.
+        self.vision = VisionCoordinator(
+            self.vision_tickets,
+            self.vision_frames,
+            self.vision_analyzer,
+            enabled=settings.vision_enabled,
+            ticket_ttl_seconds=settings.vision_ticket_ttl_seconds,
+            authorize_client_session=self.metastudio.authorize_client_session,
+            turn_close_wait_ms=settings.vision_turn_close_wait_ms,
+            fast_analyzer=self.vision_fast_analyzer,
+            fast_max_concurrency=settings.vision_fast_max_concurrency,
+            late_memory_ttl_seconds=settings.vision_late_memory_ttl_seconds,
+        )
+        self.metastudio.vision = self.vision
         self.applications = ApplicationCoordinator(
             self.repository,
             self.object_store,
             self.idempotency,
             settings.max_material_bytes,
         )
+        self.material_documents = MaterialDocumentCoordinator(
+            self.repository,
+            self.object_store,
+            self.idempotency,
+            enabled=settings.material_documents_enabled,
+            retention_hours=settings.material_document_retention_hours,
+            model_name=(
+                settings.material_template_model
+                if settings.material_template_provider == "dashscope"
+                else MockMaterialTemplateAnalyzer.model_name
+            ),
+            release_lane=settings.material_document_release_lane,
+            user_daily_limit=settings.material_document_user_daily_limit,
+            user_active_limit=settings.material_document_user_active_limit,
+            global_daily_limit=settings.material_document_global_daily_limit,
+            global_queue_limit=settings.material_document_global_queue_limit,
+        )
+        # Consultation chat may discover templates and mint a short-lived
+        # confirmation intent, but it never confirms or starts generation.
+        self.consultations.material_documents = self.material_documents
         self.reviews = ReviewCoordinator(self.repository, self.idempotency)
         self.handoffs = HandoffCoordinator(self.repository, self.idempotency)
         self.appointments = AppointmentCoordinator(self.repository, self.idempotency)
@@ -207,6 +317,22 @@ class BusinessRuntime:
                 self.settings.demo_staff_username,
                 self._seed_password_hashes[1],
             )
+            packed_templates = getattr(
+                self, "_packed_material_templates", ()
+            )
+            for template in packed_templates:
+                if (
+                    template.source_bytes is not None
+                    and template.source_object_key is not None
+                ):
+                    await self.object_store.put_bytes(
+                        self.object_store.material_templates_bucket,
+                        template.source_object_key,
+                        template.source_bytes,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+            if packed_templates:
+                await self.repository.seed_material_templates(packed_templates)
             await self.repository.recover_stale_knowledge_jobs()
             # Existing persistent volumes may contain vectors written before
             # the ACTIVE dynamic field was introduced. Re-upsert authoritative
@@ -214,11 +340,52 @@ class BusinessRuntime:
             active_chunks = await self.repository.list_active_knowledge_chunks()
             if active_chunks:
                 await self.vector_index.activate_chunks(active_chunks)
+            if (
+                self.settings.vision_enabled
+                and self._vision_cleanup_task is None
+            ):
+                self._vision_cleanup_task = asyncio.create_task(
+                    self._vision_cleanup_loop(),
+                    name="metastudio-vision-frame-ttl",
+                )
             self._startup_complete = True
 
-    async def close(self) -> None:
-        await asyncio.gather(
-            self.metastudio_sessions.close(),
-            self.metastudio_once_codes.close(),
-            return_exceptions=True,
+    async def _vision_cleanup_loop(self) -> None:
+        interval = max(
+            0.25,
+            min(1.0, self.settings.vision_frame_ttl_seconds / 4),
         )
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.vision.cleanup_expired()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Cleanup is memory-local and retried on the next short tick;
+                # it must not take down the API or emit image-derived logs.
+                continue
+
+    async def close(self) -> None:
+        cleanup_task = self._vision_cleanup_task
+        self._vision_cleanup_task = None
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
+        await self.vision.close()
+        tasks = [
+            self.metastudio_sessions.close(),
+            self.vision_tickets.close(),
+            self.metastudio_once_codes.close(),
+        ]
+        close_vision_analyzer = getattr(self.vision_analyzer, "close", None)
+        if callable(close_vision_analyzer):
+            tasks.append(close_vision_analyzer())
+        close_fast_vision_analyzer = getattr(
+            self.vision_fast_analyzer, "close", None
+        )
+        if callable(close_fast_vision_analyzer):
+            tasks.append(close_fast_vision_analyzer())
+        if self.vision_analysis_quota is not None:
+            tasks.append(self.vision_analysis_quota.close())
+        await asyncio.gather(*tasks, return_exceptions=True)

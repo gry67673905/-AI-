@@ -10,9 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class MetaStudioMessageRequest(BaseModel):
     # Huawei may add message metadata (for example, a role) independently of
-    # the documented content field.  The callback only consumes content, so
-    # ignoring bounded unknown metadata is safer than coupling availability to
-    # a vendor-side additive change.
+    # the documented content field. The callback ignores that untrusted
+    # metadata; the application reconstructs Human/AI roles from the bounded
+    # alternating message order, whose last item is the current user question.
     model_config = ConfigDict(extra="ignore")
 
     content: str = Field(min_length=1, max_length=4096)
@@ -104,3 +104,18 @@ class MetaStudioIntentExchangeResponse(BaseModel):
     section: str
     prefill: dict[str, Any]
     requires_confirmation: bool = True
+
+
+class MetaStudioVisionSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_session_id: UUID
+
+
+class MetaStudioVisionSessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    vision_session_id: UUID
+    vision_websocket_url: str
+    vision_token: str
+    vision_expires_at: datetime
